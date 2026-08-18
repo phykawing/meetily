@@ -172,6 +172,51 @@ impl SettingsRepository {
         Ok(())
     }
 
+    /// Gets the persisted meeting vocabulary (names, jargon, product terms) folded into the
+    /// Whisper initial prompt. `None` when nothing has been saved yet.
+    pub async fn get_meeting_vocabulary(
+        pool: &SqlitePool,
+    ) -> std::result::Result<Option<String>, sqlx::Error> {
+        let vocabulary: Option<Option<String>> =
+            sqlx::query_scalar("SELECT meetingVocabulary FROM transcript_settings WHERE id = '1' LIMIT 1")
+                .fetch_optional(pool)
+                .await?;
+        Ok(vocabulary.flatten())
+    }
+
+    /// Saves the meeting vocabulary. Whitespace-only input is normalized to `NULL` so an
+    /// empty vocabulary produces no prompt at all.
+    ///
+    /// Updates the existing row when one is present, so this never overwrites a provider
+    /// the user already chose. Only falls back to inserting a fresh row (with the app's
+    /// documented default provider) when no transcript settings exist at all yet.
+    pub async fn save_meeting_vocabulary(
+        pool: &SqlitePool,
+        vocabulary: Option<&str>,
+    ) -> std::result::Result<(), sqlx::Error> {
+        let cleaned = vocabulary.map(str::trim).filter(|v| !v.is_empty());
+
+        let result = sqlx::query("UPDATE transcript_settings SET meetingVocabulary = $1 WHERE id = '1'")
+            .bind(cleaned)
+            .execute(pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            sqlx::query(
+                r#"
+                INSERT INTO transcript_settings (id, provider, model, meetingVocabulary)
+                VALUES ('1', 'parakeet', $1, $2)
+                "#,
+            )
+            .bind(crate::config::DEFAULT_PARAKEET_MODEL)
+            .bind(cleaned)
+            .execute(pool)
+            .await?;
+        }
+
+        Ok(())
+    }
+
     pub async fn save_transcript_api_key(
         pool: &SqlitePool,
         provider: &str,
@@ -344,5 +389,75 @@ impl SettingsRepository {
         .await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn migrated_pool() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn meeting_vocabulary_round_trips() {
+        let pool = migrated_pool().await;
+
+        assert_eq!(SettingsRepository::get_meeting_vocabulary(&pool).await.unwrap(), None);
+
+        SettingsRepository::save_meeting_vocabulary(&pool, Some("陳大文, Zackriya"))
+            .await
+            .unwrap();
+        assert_eq!(
+            SettingsRepository::get_meeting_vocabulary(&pool).await.unwrap().as_deref(),
+            Some("陳大文, Zackriya")
+        );
+
+        // Overwriting must not disturb an unrelated column already set on the row.
+        SettingsRepository::save_transcript_config(&pool, "localWhisper", "large-v3")
+            .await
+            .unwrap();
+        assert_eq!(
+            SettingsRepository::get_meeting_vocabulary(&pool).await.unwrap().as_deref(),
+            Some("陳大文, Zackriya")
+        );
+    }
+
+    #[tokio::test]
+    async fn whitespace_only_vocabulary_is_stored_as_none() {
+        let pool = migrated_pool().await;
+
+        SettingsRepository::save_meeting_vocabulary(&pool, Some("   \n\t  "))
+            .await
+            .unwrap();
+        assert_eq!(SettingsRepository::get_meeting_vocabulary(&pool).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn clearing_vocabulary_removes_it() {
+        let pool = migrated_pool().await;
+
+        SettingsRepository::save_meeting_vocabulary(&pool, Some("Zackriya")).await.unwrap();
+        SettingsRepository::save_meeting_vocabulary(&pool, None).await.unwrap();
+        assert_eq!(SettingsRepository::get_meeting_vocabulary(&pool).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn saving_vocabulary_never_overwrites_an_already_chosen_provider() {
+        let pool = migrated_pool().await;
+
+        SettingsRepository::save_transcript_config(&pool, "localWhisper", "large-v3")
+            .await
+            .unwrap();
+        SettingsRepository::save_meeting_vocabulary(&pool, Some("Zackriya"))
+            .await
+            .unwrap();
+
+        let config = SettingsRepository::get_transcript_config(&pool).await.unwrap().unwrap();
+        assert_eq!(config.provider, "localWhisper");
+        assert_eq!(config.model, "large-v3");
     }
 }

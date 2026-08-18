@@ -1,3 +1,5 @@
+use crate::database::repositories::setting::SettingsRepository;
+use crate::state::AppState;
 use crate::whisper_engine::{ModelInfo, WhisperEngine};
 use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
@@ -286,6 +288,11 @@ pub async fn whisper_validate_model_ready_with_config<R: tauri::Runtime>(
     };
 
     if let Some(engine) = engine {
+        // Refresh the meeting vocabulary from the database before every session so edits
+        // take effect on the next transcription, regardless of whether a model reload
+        // happens below.
+        refresh_vocabulary_from_db(app, &engine).await;
+
         // Check if a model is currently loaded
         if engine.is_model_loaded().await {
             if let Some(current_model) = engine.get_current_model().await {
@@ -557,5 +564,47 @@ pub async fn open_models_folder() -> Result<(), String> {
     }
 
     log::info!("Opened models folder: {}", folder_path);
+    Ok(())
+}
+
+/// Loads the persisted meeting vocabulary into `engine` from the database. Called at the
+/// start of every transcription session so an edit made in Settings takes effect on the
+/// next transcription without a model reload or restart.
+pub async fn refresh_vocabulary_from_db<R: Runtime>(app: &AppHandle<R>, engine: &WhisperEngine) {
+    let app_state = app.state::<AppState>();
+    let pool = app_state.db_manager.pool();
+    match SettingsRepository::get_meeting_vocabulary(pool).await {
+        Ok(vocabulary) => engine.set_vocabulary(vocabulary).await,
+        Err(e) => log::warn!("Failed to load meeting vocabulary: {}", e),
+    }
+}
+
+/// Gets the persisted meeting vocabulary, for display in Settings.
+#[command]
+pub async fn get_meeting_vocabulary(state: tauri::State<'_, AppState>) -> Result<Option<String>, String> {
+    SettingsRepository::get_meeting_vocabulary(state.db_manager.pool())
+        .await
+        .map_err(|e| format!("Failed to get meeting vocabulary: {}", e))
+}
+
+/// Persists the meeting vocabulary and, if the Whisper engine is initialized, applies it
+/// immediately so the change takes effect on the next transcription.
+#[command]
+pub async fn save_meeting_vocabulary(
+    state: tauri::State<'_, AppState>,
+    vocabulary: Option<String>,
+) -> Result<(), String> {
+    SettingsRepository::save_meeting_vocabulary(state.db_manager.pool(), vocabulary.as_deref())
+        .await
+        .map_err(|e| format!("Failed to save meeting vocabulary: {}", e))?;
+
+    let engine = {
+        let guard = WHISPER_ENGINE.lock().unwrap();
+        guard.as_ref().cloned()
+    };
+    if let Some(engine) = engine {
+        engine.set_vocabulary(vocabulary).await;
+    }
+
     Ok(())
 }

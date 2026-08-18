@@ -532,6 +532,10 @@ async fn get_or_init_whisper<R: Runtime>(
 
     match engine {
         Some(e) => {
+            // Refresh the meeting vocabulary from the database so it applies to
+            // retranscription the same way it applies to live transcription.
+            crate::whisper_engine::commands::refresh_vocabulary_from_db(app, &e).await;
+
             // Determine which model to use
             let target_model = match requested_model {
                 Some(model) => model.to_string(),
