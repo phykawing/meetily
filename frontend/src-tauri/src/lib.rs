@@ -567,6 +567,10 @@ pub fn run() {
             whisper_engine::commands::whisper_download_model,
             whisper_engine::commands::whisper_cancel_download,
             whisper_engine::commands::whisper_delete_corrupted_model,
+            whisper_engine::commands::whisper_list_custom_models,
+            whisper_engine::commands::whisper_register_custom_model,
+            whisper_engine::commands::whisper_remove_custom_model,
+            whisper_engine::commands::whisper_select_custom_model_file,
             whisper_engine::commands::get_meeting_vocabulary,
             whisper_engine::commands::save_meeting_vocabulary,
             // Parakeet engine commands

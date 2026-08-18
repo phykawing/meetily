@@ -19,6 +19,17 @@ export type ModelStatus =
   | { Error: string }
   | { Corrupted: { file_size: number; expected_min_size: number } };
 
+// A user-registered ggml model (e.g. a locally converted Cantonese fine-tune). Field names
+// are snake_case because they come straight off the Rust `CustomModel` struct.
+export interface CustomModel {
+  name: string;
+  path: string;
+  /** Language token the model was fine-tuned with (`yue`, `zh`, ...). Null behaves like a stock model. */
+  engine_language: string | null;
+  supports_cantonese: boolean;
+  description: string;
+}
+
 export interface ModelDownloadProgress {
   modelName: string;
   progress: number;
@@ -330,5 +341,30 @@ export class WhisperAPI {
 
   static async openModelsFolder(): Promise<void> {
     await invoke('open_models_folder');
+  }
+
+  static async listCustomModels(): Promise<CustomModel[]> {
+    return await invoke('whisper_list_custom_models');
+  }
+
+  /** Registers a ggml file as a selectable model. Returns the updated registry. */
+  static async registerCustomModel(registration: {
+    name: string;
+    path: string;
+    engineLanguage: string | null;
+    supportsCantonese: boolean;
+    description: string;
+  }): Promise<CustomModel[]> {
+    return await invoke('whisper_register_custom_model', registration);
+  }
+
+  /** Unregisters a custom model. The model file on disk is left alone. */
+  static async removeCustomModel(name: string): Promise<CustomModel[]> {
+    return await invoke('whisper_remove_custom_model', { name });
+  }
+
+  /** Opens a native file picker for a ggml file. Resolves to null if the user cancels. */
+  static async selectCustomModelFile(): Promise<string | null> {
+    return await invoke('whisper_select_custom_model_file');
   }
 }

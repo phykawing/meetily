@@ -1,5 +1,6 @@
 use crate::database::repositories::setting::SettingsRepository;
 use crate::state::AppState;
+use crate::whisper_engine::custom_models::{self, CustomModel};
 use crate::whisper_engine::{ModelInfo, WhisperEngine};
 use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
@@ -523,6 +524,105 @@ pub async fn whisper_delete_corrupted_model(model_name: String) -> Result<String
     } else {
         Err("Whisper engine not initialized".to_string())
     }
+}
+
+// ============================================================================
+// Custom (user-registered) models
+//
+// A locally converted fine-tune - a Cantonese one, typically - is referenced in place
+// rather than downloaded, and declares the language token it was trained with. All three
+// commands go through the engine so its custom-model cache is refreshed in the same
+// call: that cache is what resolve_decoding() reads to pick the token, so a registration
+// that only touched the JSON file would not take effect until the next restart.
+// ============================================================================
+
+/// The registered custom models, for the model manager's list.
+#[command]
+pub async fn whisper_list_custom_models() -> Result<Vec<CustomModel>, String> {
+    let engine = require_engine()?;
+    Ok(custom_models::load(&engine.get_models_directory().await))
+}
+
+/// Registers a ggml file as a selectable model. Returns the full registry so the caller
+/// does not need a second round-trip.
+#[command]
+pub async fn whisper_register_custom_model(
+    name: String,
+    path: String,
+    engine_language: Option<String>,
+    supports_cantonese: bool,
+    description: Option<String>,
+) -> Result<Vec<CustomModel>, String> {
+    let engine = require_engine()?;
+    let models_dir = engine.get_models_directory().await;
+
+    let model = CustomModel {
+        name,
+        path: PathBuf::from(path),
+        engine_language,
+        supports_cantonese,
+        description: description.unwrap_or_default(),
+    };
+    let registered = custom_models::add(&models_dir, model)
+        .map_err(|e| format!("Failed to register model: {}", e))?;
+
+    refresh_custom_model_cache(&engine).await?;
+    Ok(registered)
+}
+
+/// Unregisters a custom model. The model file itself is left alone - it was never copied
+/// into the models directory, and it is not Meetily's to delete.
+#[command]
+pub async fn whisper_remove_custom_model(name: String) -> Result<Vec<CustomModel>, String> {
+    let engine = require_engine()?;
+    let models_dir = engine.get_models_directory().await;
+
+    let remaining = custom_models::remove(&models_dir, &name)
+        .map_err(|e| format!("Failed to remove model: {}", e))?;
+
+    refresh_custom_model_cache(&engine).await?;
+    Ok(remaining)
+}
+
+/// Opens a file picker for a ggml model file. Returns `None` when the user cancels.
+/// Lives on the Rust side, like the audio import picker, so no dialog capability has to
+/// be granted to the webview.
+#[command]
+pub async fn whisper_select_custom_model_file<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let app = app.clone();
+    let picked = tokio::task::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .add_filter("Whisper models", &["bin"])
+            .blocking_pick_file()
+    })
+    .await
+    .map_err(|e| format!("File dialog task failed: {}", e))?;
+
+    Ok(picked.map(|path| path.to_string()))
+}
+
+fn require_engine() -> Result<Arc<WhisperEngine>, String> {
+    WHISPER_ENGINE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| "Whisper engine not initialized".to_string())
+}
+
+/// Re-reads the registry into the engine, so a just-registered model is selectable and
+/// decodes with its declared token without a restart.
+async fn refresh_custom_model_cache(engine: &WhisperEngine) -> Result<(), String> {
+    engine
+        .discover_models()
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("Failed to refresh model list: {}", e))
 }
 
 /// Open the models folder in the system file explorer

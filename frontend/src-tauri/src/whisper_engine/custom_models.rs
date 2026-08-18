@@ -83,6 +83,7 @@ fn save(models_dir: &Path, models: &[CustomModel]) -> Result<()> {
 /// not point at a readable file — a broken entry would only surface much later as a
 /// confusing load failure.
 pub fn add(models_dir: &Path, model: CustomModel) -> Result<Vec<CustomModel>> {
+    let model = normalize(model);
     validate(&model)?;
 
     let mut models = load(models_dir);
@@ -103,6 +104,22 @@ pub fn remove(models_dir: &Path, name: &str) -> Result<Vec<CustomModel>> {
     }
     save(models_dir, &models)?;
     Ok(models)
+}
+
+/// Trims the free-text fields and drops blank ones. The registration form sends empty
+/// strings for anything the user left alone, and an `engine_language` of `Some("")` would
+/// be forced on whisper.cpp as a language token; blank means "no declaration" instead.
+/// Runs before validation so whitespace cannot smuggle a name past the collision checks.
+fn normalize(model: CustomModel) -> CustomModel {
+    CustomModel {
+        name: model.name.trim().to_string(),
+        engine_language: model
+            .engine_language
+            .map(|token| token.trim().to_string())
+            .filter(|token| !token.is_empty()),
+        description: model.description.trim().to_string(),
+        ..model
+    }
 }
 
 fn validate(model: &CustomModel) -> Result<()> {
@@ -169,6 +186,45 @@ mod tests {
         assert_eq!(loaded[0].name, "cantonese-turbo");
         assert_eq!(loaded[0].engine_language.as_deref(), Some("yue"));
         assert!(loaded[0].supports_cantonese);
+    }
+
+    #[test]
+    fn blank_and_padded_fields_are_normalized_before_storing() {
+        // The registration form sends empty strings for fields the user left alone. An
+        // engine_language of Some("") would be forced on whisper.cpp as a language token;
+        // it has to become None, which is what "behaves like a stock model" means.
+        let dir = temp_dir("normalize");
+        let file = dummy_model_file(&dir);
+        let mut model = model("  cantonese-turbo  ", file);
+        model.engine_language = Some("  ".to_string());
+        model.description = "  spaced out  ".to_string();
+        add(&dir, model).unwrap();
+
+        let loaded = load(&dir);
+        assert_eq!(loaded[0].name, "cantonese-turbo");
+        assert_eq!(loaded[0].engine_language, None);
+        assert_eq!(loaded[0].description, "spaced out");
+    }
+
+    #[test]
+    fn a_padded_engine_language_keeps_its_token() {
+        let dir = temp_dir("normalize-token");
+        let file = dummy_model_file(&dir);
+        let mut model = model("cantonese-turbo", file);
+        model.engine_language = Some(" yue ".to_string());
+        add(&dir, model).unwrap();
+
+        assert_eq!(load(&dir)[0].engine_language.as_deref(), Some("yue"));
+    }
+
+    #[test]
+    fn a_padded_catalog_name_is_still_rejected() {
+        // Normalization happens before validation, so whitespace cannot smuggle a
+        // catalog name past the collision check.
+        let dir = temp_dir("padded-catalog-clash");
+        let file = dummy_model_file(&dir);
+        let err = add(&dir, model("  large-v3-turbo  ", file)).unwrap_err();
+        assert!(err.to_string().contains("built-in"));
     }
 
     #[test]

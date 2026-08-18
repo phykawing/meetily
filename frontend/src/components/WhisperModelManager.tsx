@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'sonner';
 import {
+  CustomModel,
   ModelInfo,
   ModelStatus,
   getModelIcon,
@@ -345,6 +346,16 @@ export function ModelManager({
     });
   };
 
+  // Re-reads the list after something outside the download flow changed it (registering or
+  // removing a custom model).
+  const refreshModels = async () => {
+    try {
+      setModels(await WhisperAPI.getAvailableModels());
+    } catch (err) {
+      console.error('Failed to refresh models:', err);
+    }
+  };
+
   const deleteModel = async (modelName: string) => {
     const displayName = getDisplayName(modelName);
 
@@ -475,6 +486,9 @@ export function ModelManager({
         </Accordion>
       )}
 
+      {/* Custom (user-registered) models */}
+      <CustomModelSection onRegistryChange={refreshModels} />
+
       {/* Helper text */}
       {selectedModel && (
         <motion.div
@@ -487,6 +501,196 @@ export function ModelManager({
       )}
     </div>
   );
+}
+
+// Custom Model Section
+//
+// Registers a ggml file that Meetily did not download - typically a locally converted
+// Cantonese fine-tune (see scripts/convert-whisper-to-ggml.md). The declared language token
+// is what the engine forces when the model is selected, which is why it is asked for here:
+// nothing in a ggml file says what it was trained on.
+interface CustomModelSectionProps {
+  onRegistryChange: () => void;
+}
+
+const emptyRegistration = {
+  name: '',
+  path: '',
+  engineLanguage: '',
+  supportsCantonese: false,
+  description: ''
+};
+
+function CustomModelSection({ onRegistryChange }: CustomModelSectionProps) {
+  const [customModels, setCustomModels] = useState<CustomModel[]>([]);
+  const [form, setForm] = useState(emptyRegistration);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    WhisperAPI.listCustomModels()
+      .then(setCustomModels)
+      .catch(err => console.error('Failed to list custom models:', err));
+  }, []);
+
+  const browse = async () => {
+    try {
+      const picked = await WhisperAPI.selectCustomModelFile();
+      if (!picked) return;
+      setForm(prev => ({
+        ...prev,
+        path: picked,
+        name: prev.name || suggestModelName(picked)
+      }));
+    } catch (err) {
+      toast.error('Could not open the file picker', {
+        description: err instanceof Error ? err.message : 'Unknown error'
+      });
+    }
+  };
+
+  const register = async () => {
+    setBusy(true);
+    try {
+      const registry = await WhisperAPI.registerCustomModel({
+        ...form,
+        engineLanguage: form.engineLanguage || null
+      });
+      setCustomModels(registry);
+      setForm(emptyRegistration);
+      onRegistryChange();
+      toast.success(`${form.name} registered`, {
+        description: 'It is now selectable under Advanced Models'
+      });
+    } catch (err) {
+      // The backend rejects duplicate names, catalog names, and missing files; its message
+      // says which, so surface it as-is rather than guessing.
+      toast.error('Could not register the model', {
+        description: typeof err === 'string' ? err : err instanceof Error ? err.message : 'Unknown error',
+        duration: 6000
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (name: string) => {
+    try {
+      setCustomModels(await WhisperAPI.removeCustomModel(name));
+      onRegistryChange();
+      toast.success(`${name} removed`, { description: 'The model file itself was left in place' });
+    } catch (err) {
+      toast.error(`Could not remove ${name}`, {
+        description: typeof err === 'string' ? err : err instanceof Error ? err.message : 'Unknown error'
+      });
+    }
+  };
+
+  const canRegister = !busy && form.name.trim() !== '' && form.path.trim() !== '';
+
+  return (
+    <Accordion type="single" collapsible className="w-full">
+      <AccordionItem value="custom-models">
+        <AccordionTrigger>
+          <span className="text-lg">Custom Models</span>
+        </AccordionTrigger>
+        <AccordionContent>
+          <div className="space-y-4 pt-4">
+            {customModels.length > 0 && (
+              <div className="space-y-2">
+                {customModels.map(model => (
+                  <div
+                    key={model.name}
+                    className="flex items-start justify-between gap-3 rounded-lg border border-gray-200 bg-white p-3"
+                  >
+                    <div className="min-w-0">
+                      <div className="font-semibold text-gray-900">{model.name}</div>
+                      <div className="truncate font-mono text-xs text-gray-500">{model.path}</div>
+                      <div className="mt-1 text-xs text-gray-600">
+                        {model.engine_language
+                          ? `Decodes as "${model.engine_language}"`
+                          : 'Default language handling'}
+                        {model.supports_cantonese && ' • Cantonese-capable'}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => remove(model.name)}
+                      className="shrink-0 rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 transition-colors hover:border-red-300 hover:text-red-600"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="space-y-3 rounded-lg border border-gray-200 bg-gray-50 p-3">
+              <div className="text-sm font-medium text-gray-900">Register a converted model</div>
+
+              <div className="flex gap-2">
+                <input
+                  value={form.path}
+                  onChange={e => setForm({ ...form, path: e.target.value })}
+                  placeholder="Path to the ggml .bin file"
+                  className="min-w-0 flex-1 rounded-md border border-gray-300 px-3 py-2 font-mono text-xs"
+                />
+                <button
+                  onClick={browse}
+                  className="shrink-0 rounded-md border border-gray-300 bg-white px-3 py-2 text-sm hover:bg-gray-100"
+                >
+                  Browse
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <input
+                  value={form.name}
+                  onChange={e => setForm({ ...form, name: e.target.value })}
+                  placeholder="Name shown in the model list"
+                  className="rounded-md border border-gray-300 px-3 py-2 text-sm"
+                />
+                <input
+                  value={form.engineLanguage}
+                  onChange={e => setForm({ ...form, engineLanguage: e.target.value })}
+                  placeholder="Language token, e.g. yue (optional)"
+                  className="rounded-md border border-gray-300 px-3 py-2 text-sm"
+                />
+              </div>
+
+              <input
+                value={form.description}
+                onChange={e => setForm({ ...form, description: e.target.value })}
+                placeholder="Description (optional)"
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm"
+              />
+
+              <label className="flex items-center gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={form.supportsCantonese}
+                  onChange={e => setForm({ ...form, supportsCantonese: e.target.checked })}
+                />
+                This model was trained on Cantonese
+              </label>
+
+              <button
+                onClick={register}
+                disabled={!canRegister}
+                className="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-gray-300"
+              >
+                {busy ? 'Registering...' : 'Register'}
+              </button>
+            </div>
+          </div>
+        </AccordionContent>
+      </AccordionItem>
+    </Accordion>
+  );
+}
+
+/** `.../ggml-cantonese-turbo.bin` -> `cantonese-turbo`, as a starting point the user can edit. */
+function suggestModelName(path: string): string {
+  const file = path.split(/[\\/]/).pop() ?? '';
+  return file.replace(/\.bin$/i, '').replace(/^ggml-/i, '');
 }
 
 // Model Card Component

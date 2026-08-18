@@ -1285,6 +1285,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_registered_model_is_listed_and_decodes_with_its_declared_token() {
+        // The point of registering a fine-tune: "Cantonese" in the UI means whatever token
+        // that model was trained with, not the stock `zh` mapping.
+        let (engine, dir) = engine_without_model();
+        let model_file = dir.path().join("ggml-cantonese.bin");
+        std::fs::write(&model_file, b"not really a model").expect("write model file");
+        custom_models::add(
+            dir.path(),
+            CustomModel {
+                name: "cantonese-turbo".to_string(),
+                path: model_file,
+                engine_language: Some("yue".to_string()),
+                supports_cantonese: true,
+                description: "Cantonese fine-tune".to_string(),
+            },
+        )
+        .expect("register model");
+
+        let models = engine.discover_models().await.expect("discover models");
+        assert!(
+            models
+                .iter()
+                .any(|m| m.name == "cantonese-turbo"
+                    && matches!(m.status, ModelStatus::Available)),
+            "registered model missing from the model list"
+        );
+
+        *engine.current_model.write().await = Some("cantonese-turbo".to_string());
+        let (language_code, _, _) = engine
+            .resolve_decoding(Some(language::CANTONESE))
+            .await
+            .expect("registered model serves Cantonese");
+        assert_eq!(language_code.as_deref(), Some("yue"));
+    }
+
+    #[tokio::test]
     async fn loaded_capable_model_resolves_normally() {
         let (engine, _dir) = engine_without_model();
         *engine.current_model.write().await = Some("large-v3".to_string());
