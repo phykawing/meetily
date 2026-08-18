@@ -12,6 +12,8 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use crate::config::WHISPER_MODEL_CATALOG;
 use super::acceleration::{whisper_context_acceleration_for, WhisperCompiledBackend};
+use super::custom_models::{self, CustomModel};
+use super::language::{self, LanguageResolution};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ModelStatus {
@@ -47,6 +49,10 @@ pub struct WhisperEngine {
     cancel_download_flag: Arc<RwLock<Option<String>>>, // Model name being cancelled
     // Active downloads tracking to prevent concurrent downloads
     active_downloads: Arc<RwLock<HashSet<String>>>, // Set of models currently being downloaded
+    // User-registered ggml models, keyed by name. Refreshed by discover_models().
+    custom_models: Arc<RwLock<HashMap<String, CustomModel>>>,
+    // Meeting vocabulary (names, jargon) folded into the whisper initial prompt.
+    vocabulary: Arc<RwLock<Option<String>>>,
 }
 
 impl WhisperEngine {
@@ -163,6 +169,8 @@ impl WhisperEngine {
             cancel_download_flag: Arc::new(RwLock::new(None)),
             // Initialize active downloads tracking
             active_downloads: Arc::new(RwLock::new(HashSet::new())),
+            custom_models: Arc::new(RwLock::new(HashMap::new())),
+            vocabulary: Arc::new(RwLock::new(None)),
         };
         
         Ok(engine)
@@ -247,15 +255,98 @@ impl WhisperEngine {
             
             models.push(model_info);
         }
-        
+
+        // User-registered models live outside the catalog and are referenced in place, so
+        // their status is simply whether the file is still where it was registered.
+        let registered = custom_models::load(models_dir);
+        {
+            let mut cache = self.custom_models.write().await;
+            cache.clear();
+            for custom in &registered {
+                cache.insert(custom.name.clone(), custom.clone());
+            }
+        }
+        for custom in registered {
+            let status = if custom.path.is_file() {
+                ModelStatus::Available
+            } else {
+                log::warn!(
+                    "Custom model '{}' is registered but its file is missing: {}",
+                    custom.name,
+                    custom.path.display()
+                );
+                ModelStatus::Missing
+            };
+            models.push(ModelInfo {
+                name: custom.name.clone(),
+                size_mb: custom_models::size_mb(&custom),
+                path: custom.path,
+                accuracy: "Custom".to_string(),
+                speed: "Custom".to_string(),
+                status,
+                description: custom.description,
+            });
+        }
+
         // Update internal cache
         let mut available_models = self.available_models.write().await;
         available_models.clear();
         for model in &models {
             available_models.insert(model.name.clone(), model.clone());
         }
-        
+
         Ok(models)
+    }
+
+    pub fn models_dir(&self) -> &PathBuf {
+        &self.models_dir
+    }
+
+    /// Sets the meeting vocabulary folded into the whisper initial prompt. Takes effect on
+    /// the next transcription; no reload needed.
+    pub async fn set_vocabulary(&self, vocabulary: Option<String>) {
+        let cleaned = vocabulary
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+        *self.vocabulary.write().await = cleaned;
+    }
+
+    /// Resolves the language token and initial prompt for the currently loaded model.
+    ///
+    /// Both live here rather than at the call sites because the answer depends on *which*
+    /// model is loaded: the same UI language maps to different engine tokens depending on
+    /// what the model was trained with. See whisper_engine/language.rs.
+    async fn resolve_decoding(
+        &self,
+        ui_language: Option<&str>,
+    ) -> Result<(Option<String>, bool, Option<String>)> {
+        let ui_language = ui_language.unwrap_or("auto");
+        let model_name = self.current_model.read().await.clone().unwrap_or_default();
+        let custom_token = self
+            .custom_models
+            .read()
+            .await
+            .get(&model_name)
+            .and_then(|m| m.engine_language.clone());
+
+        let resolution =
+            language::engine_language_for(ui_language, &model_name, custom_token.as_deref());
+        let (language_code, translate) = match resolution {
+            LanguageResolution::AutoDetect { translate } => (None, translate),
+            LanguageResolution::Forced(code) => (Some(code.to_string()), false),
+            LanguageResolution::Unsupported => {
+                return Err(anyhow!(
+                    "Model '{}' cannot transcribe '{}'. Load a Cantonese-capable model \
+                     (large-v3 family, or a registered Cantonese model).",
+                    model_name,
+                    ui_language
+                ));
+            }
+        };
+
+        let vocabulary = self.vocabulary.read().await.clone();
+        let prompt = language::build_initial_prompt(ui_language, vocabulary.as_deref());
+        Ok((language_code, translate, prompt))
     }
     
     pub async fn load_model(&self, model_name: &str) -> Result<()> {
@@ -514,6 +605,11 @@ impl WhisperEngine {
     
     /// Transcribe audio with streaming support for partial results and adaptive quality
     pub async fn transcribe_audio_with_confidence(&self, audio_data: Vec<f32>, language: Option<String>) -> Result<(String, f32, bool)> {
+        // Resolved before the params are built: set_initial_prompt borrows the string, so
+        // it has to outlive them.
+        let (language_code, should_translate, initial_prompt) =
+            self.resolve_decoding(language.as_deref()).await?;
+
         let ctx_lock = self.current_context.read().await;
         let ctx = ctx_lock.as_ref()
             .ok_or_else(|| anyhow!("No model loaded. Please load a model first."))?;
@@ -528,17 +624,13 @@ impl WhisperEngine {
             patience: 1.0
         });
 
-        // Configure with adaptive settings
-        // If language is "auto" or None, use automatic language detection (pass None)
-        // If language is "auto-translate", enable translation to English
-        // Otherwise, use the specified language code
-        let (language_code, should_translate) = match language.as_deref() {
-            Some("auto") | None => (None, false),
-            Some("auto-translate") => (None, true),
-            Some(lang) => (Some(lang), false),
-        };
-        params.set_language(language_code);
+        // Configure with adaptive settings. The language token and the initial prompt both
+        // depend on which model is loaded - see resolve_decoding().
+        params.set_language(language_code.as_deref());
         params.set_translate(should_translate);
+        if let Some(prompt) = initial_prompt.as_deref() {
+            params.set_initial_prompt(prompt);
+        }
 
         // CRITICAL: Disable timestamp tokens to prevent whisper.cpp chunking heuristics
         // The "single timestamp ending - skip entire chunk" optimization incorrectly discards
@@ -631,6 +723,11 @@ impl WhisperEngine {
     }
 
     pub async fn transcribe_audio(&self, audio_data: Vec<f32>, language: Option<String>) -> Result<String> {
+        // See transcribe_audio_with_confidence: resolved up front so the prompt outlives
+        // the params that borrow it.
+        let (language_code, should_translate, initial_prompt) =
+            self.resolve_decoding(language.as_deref()).await?;
+
         let ctx_lock = self.current_context.read().await;
         let ctx = ctx_lock.as_ref()
             .ok_or_else(|| anyhow!("No model loaded. Please load a model first."))?;
@@ -645,17 +742,12 @@ impl WhisperEngine {
             patience: 1.0
         });
 
-        // Configure for good quality
-        // If language is "auto" or None, use automatic language detection (pass None)
-        // If language is "auto-translate", enable translation to English
-        // Otherwise, use the specified language code
-        let (language_code, should_translate) = match language.as_deref() {
-            Some("auto") | None => (None, false),
-            Some("auto-translate") => (None, true),
-            Some(lang) => (Some(lang), false),
-        };
-        params.set_language(language_code);
+        // Configure for good quality. Language token and prompt depend on the loaded model.
+        params.set_language(language_code.as_deref());
         params.set_translate(should_translate);
+        if let Some(prompt) = initial_prompt.as_deref() {
+            params.set_initial_prompt(prompt);
+        }
 
         // CRITICAL: Disable timestamp tokens to prevent whisper.cpp chunking heuristics
         // The "single timestamp ending - skip entire chunk" optimization incorrectly discards
