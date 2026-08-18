@@ -6,6 +6,7 @@ use super::common::{create_transcript_segments, split_segment_at_silence, write_
 use super::constants::AUDIO_EXTENSIONS;
 use crate::config::{DEFAULT_WHISPER_MODEL, DEFAULT_PARAKEET_MODEL};
 use crate::parakeet_engine::ParakeetEngine;
+use crate::script::ScriptSetting;
 use crate::state::AppState;
 use crate::whisper_engine::WhisperEngine;
 use anyhow::{anyhow, Result};
@@ -418,13 +419,17 @@ async fn run_retranscription<R: Runtime>(
 
     emit_progress(&app, &meeting_id, "saving", 80, "Saving transcripts...");
 
-    // Create transcript segments with proper timestamps from VAD
-    let segments = create_transcript_segments(&all_transcripts);
-
     // Save to database
     let app_state = app
         .try_state::<AppState>()
         .ok_or_else(|| anyhow!("App state not available"))?;
+
+    let script_setting = crate::script::resolve_from_pool(app_state.db_manager.pool()).await;
+
+    // Create transcript segments with proper timestamps from VAD, converting script once
+    // here (see docs/adr/0003) — this reapplies the current global setting, so a
+    // retranscription intentionally overwrites rather than reproduces a past conversion.
+    let segments = create_transcript_segments(&all_transcripts, script_setting);
 
     // Wrap delete+insert+update in a transaction to prevent data loss
     let pool = app_state.db_manager.pool();
@@ -484,6 +489,7 @@ async fn run_retranscription<R: Runtime>(
         &meeting_id,
         duration_seconds,
         &audio_filename,
+        script_setting,
     ) {
         warn!("Failed to update metadata.json: {}", e);
     }
@@ -730,6 +736,7 @@ fn write_retranscription_metadata(
     meeting_id: &str,
     duration_seconds: f64,
     audio_filename: &str,
+    script_setting: ScriptSetting,
 ) -> Result<()> {
     let metadata_path = folder.join("metadata.json");
     let temp_path = folder.join(".metadata.json.tmp");
@@ -743,6 +750,7 @@ fn write_retranscription_metadata(
             obj.insert("retranscribed_at".to_string(), serde_json::json!(now));
             obj.insert("status".to_string(), serde_json::json!("completed"));
             obj.insert("transcript_file".to_string(), serde_json::json!("transcripts.json"));
+            obj.insert("script".to_string(), serde_json::json!(script_setting.as_str()));
             obj.remove("detected_summary_language");
         }
         value
@@ -757,7 +765,8 @@ fn write_retranscription_metadata(
             "audio_file": audio_filename,
             "transcript_file": "transcripts.json",
             "status": "completed",
-            "source": "retranscription"
+            "source": "retranscription",
+            "script": script_setting.as_str()
         })
     };
 
@@ -843,7 +852,7 @@ mod tests {
     #[test]
     fn test_create_transcript_segments_empty() {
         let transcripts: Vec<(String, f64, f64)> = vec![];
-        let segments = create_transcript_segments(&transcripts);
+        let segments = create_transcript_segments(&transcripts, ScriptSetting::LeaveAsRecognized);
         assert!(segments.is_empty());
     }
 
@@ -852,7 +861,7 @@ mod tests {
         let transcripts = vec![
             ("Hello world".to_string(), 0.0, 1500.0), // 0-1.5 seconds
         ];
-        let segments = create_transcript_segments(&transcripts);
+        let segments = create_transcript_segments(&transcripts, ScriptSetting::LeaveAsRecognized);
 
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].text, "Hello world");
@@ -868,7 +877,7 @@ mod tests {
             ("Second segment".to_string(), 3000.0, 5000.0),  // 3-5 seconds
             ("Third segment".to_string(), 6500.0, 8000.0),   // 6.5-8 seconds
         ];
-        let segments = create_transcript_segments(&transcripts);
+        let segments = create_transcript_segments(&transcripts, ScriptSetting::LeaveAsRecognized);
 
         assert_eq!(segments.len(), 3);
 
@@ -896,10 +905,20 @@ mod tests {
         let transcripts = vec![
             ("  Hello with spaces  ".to_string(), 0.0, 1000.0),
         ];
-        let segments = create_transcript_segments(&transcripts);
+        let segments = create_transcript_segments(&transcripts, ScriptSetting::LeaveAsRecognized);
 
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].text, "Hello with spaces");
+    }
+
+    #[test]
+    fn test_create_transcript_segments_applies_script_setting() {
+        let transcripts = vec![("开放中文转换".to_string(), 0.0, 1000.0)];
+        let segments = create_transcript_segments(&transcripts, ScriptSetting::TraditionalHk);
+        assert_eq!(segments[0].text, "開放中文轉換");
+
+        let segments = create_transcript_segments(&transcripts, ScriptSetting::LeaveAsRecognized);
+        assert_eq!(segments[0].text, "开放中文转换");
     }
 
     #[test]
@@ -908,7 +927,7 @@ mod tests {
             ("Segment one".to_string(), 0.0, 1000.0),
             ("Segment two".to_string(), 1000.0, 2000.0),
         ];
-        let segments = create_transcript_segments(&transcripts);
+        let segments = create_transcript_segments(&transcripts, ScriptSetting::LeaveAsRecognized);
 
         assert_eq!(segments.len(), 2);
         assert_ne!(segments[0].id, segments[1].id);

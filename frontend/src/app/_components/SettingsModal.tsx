@@ -2,6 +2,7 @@ import { ModelConfig } from "@/components/ModelSettingsModal";
 import { PreferenceSettings } from "@/components/PreferenceSettings";
 import { DeviceSelection } from "@/components/DeviceSelection";
 import { LanguageSelection } from "@/components/LanguageSelection";
+import { ScriptSelection } from "@/components/ScriptSelection";
 import { MeetingVocabulary } from "@/components/MeetingVocabulary";
 import { TranscriptSettings } from "@/components/TranscriptSettings";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -229,6 +230,8 @@ export function SettingsModals({
             disabled={isRecording}
             provider={transcriptModelConfig.provider}
           />
+
+          <ScriptSelection disabled={isRecording} />
 
           <MeetingVocabulary disabled={isRecording} />
 

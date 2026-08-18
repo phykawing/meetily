@@ -4,6 +4,8 @@
 // Delegates to transcription and recording modules for actual implementation.
 
 use anyhow::Result;
+use crate::script::ScriptSetting;
+use crate::state::AppState;
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use std::sync::{
@@ -59,6 +61,20 @@ pub struct TranscriptionStatus {
     pub chunks_in_queue: usize,
     pub is_processing: bool,
     pub last_activity_ms: u64,
+}
+
+/// Resolves the currently configured Script setting from the database, defaulting to
+/// Traditional (Hong Kong) when app state or the database read is unavailable. Recorded
+/// in the meeting's metadata.json so the conversion applied to this session is
+/// auditable later (see docs/adr/0003).
+async fn resolve_script_setting<R: Runtime>(app: &AppHandle<R>) -> ScriptSetting {
+    match app.try_state::<AppState>() {
+        Some(app_state) => crate::script::resolve_from_pool(app_state.db_manager.pool()).await,
+        None => {
+            warn!("App state not available, defaulting script setting to Traditional HK");
+            ScriptSetting::default()
+        }
+    }
 }
 
 // ============================================================================
@@ -225,6 +241,11 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         )
     });
     manager.set_meeting_name(Some(effective_meeting_name));
+    // Resolved once here — before model loading, which can take seconds — and reused for
+    // both the metadata write below and the transcription task, so the two can never
+    // diverge if the user changes the setting mid-startup (see docs/adr/0003).
+    let script_setting = resolve_script_setting(&app).await;
+    manager.set_script_setting(script_setting.as_str());
 
     // Set up error callback
     let app_for_error = app.clone();
@@ -251,7 +272,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     reset_speech_detected_flag(); // Reset for new recording session
 
     // Start optimized parallel transcription task and store handle
-    let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver);
+    let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver, script_setting);
     {
         let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
         *global_task = Some(task_handle);
@@ -396,6 +417,11 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         )
     });
     manager.set_meeting_name(Some(effective_meeting_name));
+    // Resolved once here — before model loading, which can take seconds — and reused for
+    // both the metadata write below and the transcription task, so the two can never
+    // diverge if the user changes the setting mid-startup (see docs/adr/0003).
+    let script_setting = resolve_script_setting(&app).await;
+    manager.set_script_setting(script_setting.as_str());
 
     // Set up error callback
     let app_for_error = app.clone();
@@ -422,7 +448,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     reset_speech_detected_flag(); // Reset for new recording session
 
     // Start optimized parallel transcription task and store handle
-    let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver);
+    let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver, script_setting);
     {
         let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
         *global_task = Some(task_handle);

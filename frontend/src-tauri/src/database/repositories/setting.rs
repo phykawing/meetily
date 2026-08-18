@@ -217,6 +217,49 @@ impl SettingsRepository {
         Ok(())
     }
 
+    /// Gets the persisted Script setting token (see `crate::script::ScriptSetting`), for
+    /// display in Settings. `None` when nothing has been saved yet — callers resolve that
+    /// to the default via `ScriptSetting::from_stored`.
+    pub async fn get_script_setting(
+        pool: &SqlitePool,
+    ) -> std::result::Result<Option<String>, sqlx::Error> {
+        let setting: Option<Option<String>> =
+            sqlx::query_scalar("SELECT scriptSetting FROM transcript_settings WHERE id = '1' LIMIT 1")
+                .fetch_optional(pool)
+                .await?;
+        Ok(setting.flatten())
+    }
+
+    /// Saves the Script setting token.
+    ///
+    /// Updates the existing row when one is present, so this never overwrites a provider
+    /// the user already chose. Only falls back to inserting a fresh row (with the app's
+    /// documented default provider) when no transcript settings exist at all yet.
+    pub async fn save_script_setting(
+        pool: &SqlitePool,
+        script_setting: &str,
+    ) -> std::result::Result<(), sqlx::Error> {
+        let result = sqlx::query("UPDATE transcript_settings SET scriptSetting = $1 WHERE id = '1'")
+            .bind(script_setting)
+            .execute(pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            sqlx::query(
+                r#"
+                INSERT INTO transcript_settings (id, provider, model, scriptSetting)
+                VALUES ('1', 'parakeet', $1, $2)
+                "#,
+            )
+            .bind(crate::config::DEFAULT_PARAKEET_MODEL)
+            .bind(script_setting)
+            .execute(pool)
+            .await?;
+        }
+
+        Ok(())
+    }
+
     pub async fn save_transcript_api_key(
         pool: &SqlitePool,
         provider: &str,
@@ -453,6 +496,46 @@ mod tests {
             .await
             .unwrap();
         SettingsRepository::save_meeting_vocabulary(&pool, Some("Zackriya"))
+            .await
+            .unwrap();
+
+        let config = SettingsRepository::get_transcript_config(&pool).await.unwrap().unwrap();
+        assert_eq!(config.provider, "localWhisper");
+        assert_eq!(config.model, "large-v3");
+    }
+
+    #[tokio::test]
+    async fn script_setting_round_trips() {
+        let pool = migrated_pool().await;
+
+        assert_eq!(SettingsRepository::get_script_setting(&pool).await.unwrap(), None);
+
+        SettingsRepository::save_script_setting(&pool, "simplified")
+            .await
+            .unwrap();
+        assert_eq!(
+            SettingsRepository::get_script_setting(&pool).await.unwrap().as_deref(),
+            Some("simplified")
+        );
+
+        // Overwriting must not disturb an unrelated column already set on the row.
+        SettingsRepository::save_transcript_config(&pool, "localWhisper", "large-v3")
+            .await
+            .unwrap();
+        assert_eq!(
+            SettingsRepository::get_script_setting(&pool).await.unwrap().as_deref(),
+            Some("simplified")
+        );
+    }
+
+    #[tokio::test]
+    async fn saving_script_setting_never_overwrites_an_already_chosen_provider() {
+        let pool = migrated_pool().await;
+
+        SettingsRepository::save_transcript_config(&pool, "localWhisper", "large-v3")
+            .await
+            .unwrap();
+        SettingsRepository::save_script_setting(&pool, "as-recognized")
             .await
             .unwrap();
 

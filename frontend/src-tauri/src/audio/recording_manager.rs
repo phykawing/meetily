@@ -434,6 +434,12 @@ impl RecordingManager {
         self.recording_saver.set_meeting_name(name);
     }
 
+    /// Set the Script setting applied to this recording session's transcript. Must be
+    /// called before `start_recording` to be recorded in the meeting's metadata.json.
+    pub fn set_script_setting(&mut self, setting: &str) {
+        self.recording_saver.set_script_setting(setting);
+    }
+
     /// Add a structured transcript segment to be saved later
     pub fn add_transcript_segment(&self, segment: super::recording_saver::TranscriptSegment) {
         self.recording_saver.add_transcript_segment(segment);

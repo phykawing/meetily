@@ -708,3 +708,27 @@ pub async fn save_meeting_vocabulary(
 
     Ok(())
 }
+
+/// Gets the persisted Script setting, for display in Settings. Defaults to Traditional
+/// (Hong Kong) when nothing has been saved yet.
+#[command]
+pub async fn get_script_setting(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let stored = SettingsRepository::get_script_setting(state.db_manager.pool())
+        .await
+        .map_err(|e| format!("Failed to get script setting: {}", e))?;
+    Ok(crate::script::ScriptSetting::from_stored(stored.as_deref()).as_str().to_string())
+}
+
+/// Persists the Script setting. Applied the next time a transcript is stored (recording,
+/// import, or retranscription) — not retroactively to existing meetings.
+#[command]
+pub async fn save_script_setting(
+    state: tauri::State<'_, AppState>,
+    script_setting: String,
+) -> Result<(), String> {
+    // Normalize through the enum so an unrecognized value never reaches the database.
+    let resolved = crate::script::ScriptSetting::from_stored(Some(&script_setting));
+    SettingsRepository::save_script_setting(state.db_manager.pool(), resolved.as_str())
+        .await
+        .map_err(|e| format!("Failed to save script setting: {}", e))
+}

@@ -1,4 +1,5 @@
 use crate::api::TranscriptSegment;
+use crate::script::{self, ScriptSetting};
 use anyhow::Result;
 use log::{debug, info};
 use once_cell::sync::Lazy;
@@ -46,9 +47,13 @@ pub(crate) async fn unload_engine_after_batch(use_parakeet: bool) {
     }
 }
 
-/// Create transcript segments from transcription results.
+/// Create transcript segments from transcription results, applying the Script setting so
+/// the conversion happens once here rather than on every later read (see docs/adr/0003).
 /// Each tuple is (text, start_ms, end_ms) from VAD timestamps.
-pub(crate) fn create_transcript_segments(transcripts: &[(String, f64, f64)]) -> Vec<TranscriptSegment> {
+pub(crate) fn create_transcript_segments(
+    transcripts: &[(String, f64, f64)],
+    script_setting: ScriptSetting,
+) -> Vec<TranscriptSegment> {
     transcripts
         .iter()
         .map(|(text, start_ms, end_ms)| {
@@ -58,7 +63,7 @@ pub(crate) fn create_transcript_segments(transcripts: &[(String, f64, f64)]) -> 
 
             TranscriptSegment {
                 id: format!("transcript-{}", Uuid::new_v4()),
-                text: text.trim().to_string(),
+                text: script::convert(text.trim(), script_setting),
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 audio_start_time: Some(start_seconds),
                 audio_end_time: Some(end_seconds),

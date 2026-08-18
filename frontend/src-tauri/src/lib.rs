@@ -49,6 +49,7 @@ pub mod anthropic;
 pub mod groq;
 pub mod openrouter;
 pub mod parakeet_engine;
+pub mod script;
 pub mod state;
 pub mod summary;
 pub mod tray;
@@ -573,6 +574,8 @@ pub fn run() {
             whisper_engine::commands::whisper_select_custom_model_file,
             whisper_engine::commands::get_meeting_vocabulary,
             whisper_engine::commands::save_meeting_vocabulary,
+            whisper_engine::commands::get_script_setting,
+            whisper_engine::commands::save_script_setting,
             // Parakeet engine commands
             parakeet_engine::commands::parakeet_init,
             parakeet_engine::commands::parakeet_get_available_models,
