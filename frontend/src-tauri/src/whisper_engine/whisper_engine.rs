@@ -321,7 +321,16 @@ impl WhisperEngine {
         ui_language: Option<&str>,
     ) -> Result<(Option<String>, bool, Option<String>)> {
         let ui_language = ui_language.unwrap_or("auto");
-        let model_name = self.current_model.read().await.clone().unwrap_or_default();
+        // Ahead of the language lookup on purpose: with no model loaded there is no model
+        // name to judge, and resolving anyway turns "nothing is loaded" into a bogus
+        // "Model '' cannot transcribe ..." capability error. Matches the message the
+        // callers' context check produces a few lines later.
+        let model_name = self
+            .current_model
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow!("No model loaded. Please load a model first."))?;
         let custom_token = self
             .custom_models
             .read()
@@ -1225,5 +1234,67 @@ impl WhisperEngine {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An engine with no model loaded, pointed at an empty directory so construction never
+    /// touches the developer's real models.
+    fn engine_without_model() -> (WhisperEngine, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("temp models dir");
+        let engine = WhisperEngine::new_with_models_dir(Some(dir.path().to_path_buf()))
+            .expect("engine construction");
+        (engine, dir)
+    }
+
+    #[tokio::test]
+    async fn no_model_loaded_reports_itself_rather_than_a_language_error() {
+        // The bug: Cantonese resolved against an empty model name looked like a capability
+        // failure ("Model '' cannot transcribe 'yue'"), hiding the real problem.
+        let (engine, _dir) = engine_without_model();
+
+        for ui_language in [None, Some("auto"), Some("en"), Some(language::CANTONESE)] {
+            let err = engine
+                .resolve_decoding(ui_language)
+                .await
+                .expect_err("no model loaded must be an error");
+            assert_eq!(
+                err.to_string(),
+                "No model loaded. Please load a model first.",
+                "ui_language {ui_language:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn loaded_model_that_cannot_serve_cantonese_still_reports_capability() {
+        let (engine, _dir) = engine_without_model();
+        *engine.current_model.write().await = Some("base".to_string());
+
+        let err = engine
+            .resolve_decoding(Some(language::CANTONESE))
+            .await
+            .expect_err("base cannot transcribe Cantonese");
+        assert!(
+            err.to_string().starts_with("Model 'base' cannot transcribe 'yue'."),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn loaded_capable_model_resolves_normally() {
+        let (engine, _dir) = engine_without_model();
+        *engine.current_model.write().await = Some("large-v3".to_string());
+
+        let (language_code, translate, prompt) = engine
+            .resolve_decoding(Some(language::CANTONESE))
+            .await
+            .expect("large-v3 serves Cantonese");
+        assert_eq!(language_code.as_deref(), Some("zh"));
+        assert!(!translate);
+        assert_eq!(prompt.as_deref(), Some(language::CANTONESE_PROMPT_SEED));
     }
 }
