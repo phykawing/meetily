@@ -35,6 +35,12 @@ pub struct Transcript {
     pub audio_start_time: Option<f64>,
     pub audio_end_time: Option<f64>,
     pub duration: Option<f64>,
+    /// Live Audio Source hint captured at recording time - 'mic' / 'system' / 'mixed',
+    /// or `None` for meetings recorded before this existed. Stored in the `speaker`
+    /// column for historical reasons; this is not the diarized Speaker. See
+    /// docs/adr/0004.
+    #[sqlx(rename = "speaker")]
+    pub audio_source: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]

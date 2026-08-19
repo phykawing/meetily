@@ -314,6 +314,7 @@ mod tests {
                 audio_start_time: Some(0.0),
                 audio_end_time: Some(1.0),
                 duration: Some(1.0),
+                audio_source: None,
             }],
             None,
         )

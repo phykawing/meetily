@@ -22,6 +22,10 @@ pub struct TranscriptSegment {
     pub display_time: String,   // Formatted time for display like "[02:15]"
     pub confidence: f32,
     pub sequence_id: u64,
+    /// Live Audio Source hint (see docs/adr/0001, docs/adr/0004): "mic", "system", or
+    /// "mixed". `None` for meetings recorded before this field existed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub audio_source: Option<String>,
 }
 
 /// Meeting metadata structure
@@ -143,6 +147,7 @@ impl RecordingSaver {
             display_time: "[00:00]".to_string(),
             confidence: 1.0,
             sequence_id: 0,
+            audio_source: None,
         };
         self.add_transcript_segment(segment);
     }

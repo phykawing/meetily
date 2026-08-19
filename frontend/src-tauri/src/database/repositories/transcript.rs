@@ -46,9 +46,11 @@ impl TranscriptsRepository {
         // 2. Save each transcript segment with audio timing fields
         for segment in transcripts {
             let transcript_id = format!("transcript-{}", Uuid::new_v4());
+            // `speaker` stores the live Audio Source hint ('mic' / 'system' / 'mixed'),
+            // not a diarized Speaker - see docs/adr/0004.
             let result = sqlx::query(
-                "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)"
+                "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             )
             .bind(&transcript_id)
             .bind(&meeting_id)
@@ -57,6 +59,7 @@ impl TranscriptsRepository {
             .bind(segment.audio_start_time)
             .bind(segment.audio_end_time)
             .bind(segment.duration)
+            .bind(&segment.audio_source)
             .execute(&mut *transaction)
             .await;
 
@@ -142,5 +145,101 @@ impl TranscriptsRepository {
             }
             None => transcript.chars().take(200).collect(), // Fallback to the start of the transcript
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::TranscriptSegment;
+    use crate::database::models::Transcript as TranscriptRow;
+
+    async fn migrated_pool() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    fn segment(id: &str, text: &str, audio_source: Option<&str>) -> TranscriptSegment {
+        TranscriptSegment {
+            id: id.to_string(),
+            text: text.to_string(),
+            timestamp: "0".to_string(),
+            audio_start_time: Some(0.0),
+            audio_end_time: Some(1.0),
+            duration: Some(1.0),
+            audio_source: audio_source.map(|s| s.to_string()),
+        }
+    }
+
+    /// The Audio Source hint (mic/system/mixed) must round-trip through the `speaker`
+    /// column exactly as saved - it's the whole point of ADR-0004 giving that dormant
+    /// column a documented meaning.
+    #[tokio::test]
+    async fn audio_source_hint_round_trips_through_the_speaker_column() {
+        let pool = migrated_pool().await;
+
+        let meeting_id = TranscriptsRepository::save_transcript(
+            &pool,
+            "Test meeting",
+            &[
+                segment("seg-mic", "from the mic", Some("mic")),
+                segment("seg-system", "from the call", Some("system")),
+                segment("seg-mixed", "everyone talking", Some("mixed")),
+                segment("seg-untagged", "no hint captured", None),
+            ],
+            None,
+        )
+        .await
+        .unwrap();
+
+        let mut rows = sqlx::query_as::<_, TranscriptRow>(
+            "SELECT * FROM transcripts WHERE meeting_id = ? ORDER BY id",
+        )
+        .bind(&meeting_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        rows.sort_by(|a, b| a.id.cmp(&b.id));
+
+        let by_text: std::collections::HashMap<String, Option<String>> = rows
+            .into_iter()
+            .map(|r| (r.transcript, r.audio_source))
+            .collect();
+
+        assert_eq!(by_text["from the mic"].as_deref(), Some("mic"));
+        assert_eq!(by_text["from the call"].as_deref(), Some("system"));
+        assert_eq!(by_text["everyone talking"].as_deref(), Some("mixed"));
+        assert_eq!(by_text["no hint captured"], None);
+    }
+
+    /// Meetings saved before this field existed have `speaker IS NULL`; reading them
+    /// back must not error or fabricate a value.
+    #[tokio::test]
+    async fn meetings_recorded_before_this_change_still_read_correctly() {
+        let pool = migrated_pool().await;
+
+        // Simulate a pre-existing row inserted the old way, without a `speaker` value.
+        sqlx::query(
+            "INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('meeting-old', 'Old meeting', datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp) VALUES ('t-old', 'meeting-old', 'legacy text', '0')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let row = sqlx::query_as::<_, TranscriptRow>("SELECT * FROM transcripts WHERE id = ?")
+            .bind("t-old")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(row.transcript, "legacy text");
+        assert_eq!(row.audio_source, None);
     }
 }

@@ -6,6 +6,7 @@ use anyhow::Result;
 
 use super::devices::AudioDevice;
 use super::buffer_pool::AudioBufferPool;
+use super::audio_source::AudioSource;
 
 /// Device type for audio chunks
 #[derive(Debug, Clone, PartialEq)]
@@ -22,6 +23,10 @@ pub struct AudioChunk {
     pub timestamp: f64,
     pub chunk_id: u64,
     pub device_type: DeviceType,
+    /// Live Audio Source hint (see docs/adr/0001, docs/adr/0004). `None` for raw
+    /// per-device capture chunks, where the concept doesn't apply; `Some` for chunks
+    /// produced by the mixer after mic+system have already been combined.
+    pub audio_source: Option<AudioSource>,
 }
 
 /// Processed audio chunk (post-VAD) for recording

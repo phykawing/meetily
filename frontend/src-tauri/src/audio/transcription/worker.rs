@@ -5,6 +5,7 @@
 use super::engine::TranscriptionEngine;
 use super::provider::TranscriptionError;
 use crate::audio::AudioChunk;
+use crate::audio::AudioSource;
 use crate::script::{self, ScriptSetting};
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,8 @@ pub fn reset_speech_detected_flag() {
 pub struct TranscriptUpdate {
     pub text: String,
     pub timestamp: String, // Wall-clock time for reference (e.g., "14:30:05")
+    /// Live Audio Source hint (see docs/adr/0001, docs/adr/0004): "mic", "system", or
+    /// "mixed" for simultaneous speech.
     pub source: String,
     pub sequence_id: u64,
     pub chunk_start_time: f64, // Legacy field, kept for compatibility
@@ -149,6 +152,7 @@ pub fn start_transcription_task<R: Runtime>(
 
                             let chunk_timestamp = chunk.timestamp;
                             let chunk_duration = chunk.data.len() as f64 / chunk.sample_rate as f64;
+                            let audio_source = chunk.audio_source.unwrap_or(AudioSource::Mixed);
 
                             // Transcribe with provider-agnostic approach
                             match transcribe_chunk_with_provider(
@@ -215,7 +219,7 @@ pub fn start_transcription_task<R: Runtime>(
                                         let update = TranscriptUpdate {
                                             text: script::convert(&transcript, script_setting),
                                             timestamp: format_current_timestamp(), // Wall-clock for reference
-                                            source: "Audio".to_string(),
+                                            source: audio_source.as_str().to_string(),
                                             sequence_id,
                                             chunk_start_time: chunk_timestamp, // Legacy compatibility
                                             is_partial,

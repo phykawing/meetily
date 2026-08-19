@@ -16,11 +16,15 @@ export interface Transcript {
   audio_start_time?: number; // Seconds from recording start (e.g., 125.3)
   audio_end_time?: number;   // Seconds from recording start (e.g., 128.6)
   duration?: number;          // Segment duration in seconds (e.g., 3.3)
+  // Live Audio Source hint (see docs/adr/0001, docs/adr/0004): "mic" | "system" | "mixed".
+  // Undefined for meetings recorded before this field existed.
+  audio_source?: string;
 }
 
 export interface TranscriptUpdate {
   text: string;
   timestamp: string; // Wall-clock time for reference
+  // Live Audio Source hint: "mic" | "system" | "mixed" (see docs/adr/0001, docs/adr/0004)
   source: string;
   sequence_id: number;
   chunk_start_time: number; // Legacy field
@@ -107,4 +111,7 @@ export interface TranscriptSegmentData {
   endTime?: number; // audio_end_time in seconds
   text: string;
   confidence?: number;
+  // Live Audio Source hint: "mic" | "system" | "mixed". Undefined when not captured
+  // (e.g. meetings recorded before this existed, or non-live views).
+  audioSource?: string;
 }

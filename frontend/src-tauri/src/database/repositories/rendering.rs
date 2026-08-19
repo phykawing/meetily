@@ -126,6 +126,7 @@ mod tests {
                 audio_start_time: Some(i as f64),
                 audio_end_time: Some(i as f64 + 1.0),
                 duration: Some(1.0),
+                audio_source: None,
             })
             .collect();
 
@@ -193,6 +194,7 @@ mod tests {
                     audio_start_time: Some(0.0),
                     audio_end_time: Some(1.0),
                     duration: Some(1.0),
+                    audio_source: None,
                 },
                 TranscriptSegment {
                     id: "seg-1".to_string(),
@@ -201,6 +203,7 @@ mod tests {
                     audio_start_time: None,
                     audio_end_time: None,
                     duration: None,
+                    audio_source: None,
                 },
                 TranscriptSegment {
                     id: "seg-2".to_string(),
@@ -209,6 +212,7 @@ mod tests {
                     audio_start_time: Some(1.0),
                     audio_end_time: Some(2.0),
                     duration: Some(1.0),
+                    audio_source: None,
                 },
             ],
             None,

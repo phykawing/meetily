@@ -1,5 +1,6 @@
 // src/audio/mod.rs
 pub mod audio_processing;
+pub mod audio_source;
 pub mod decoder;
 pub mod encode;
 pub mod ffmpeg;
@@ -81,6 +82,7 @@ pub use system_audio_commands::{
 
 // Export new simplified components
 pub use recording_state::{RecordingState, AudioChunk, ProcessedAudioChunk, AudioError, DeviceType as RecordingDeviceType};
+pub use audio_source::AudioSource;
 pub use pipeline::{AudioPipelineManager};
 pub use stream::{AudioStreamManager};
 pub use recording_manager::{RecordingManager};

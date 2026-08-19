@@ -68,6 +68,9 @@ pub(crate) fn create_transcript_segments(
                 audio_start_time: Some(start_seconds),
                 audio_end_time: Some(end_seconds),
                 duration: Some(duration),
+                // Import/retranscription reads a single saved file - there's no live
+                // mic/system split to derive a hint from (see docs/adr/0001).
+                audio_source: None,
             }
         })
         .collect()

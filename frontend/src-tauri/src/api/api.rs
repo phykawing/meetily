@@ -188,6 +188,10 @@ pub struct TranscriptSegment {
     pub audio_end_time: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<f64>,
+    /// Live Audio Source hint (see docs/adr/0001, docs/adr/0004): "mic", "system", or
+    /// "mixed". `None` for meetings recorded before this field existed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub audio_source: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
