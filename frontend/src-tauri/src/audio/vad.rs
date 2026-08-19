@@ -84,6 +84,14 @@ impl ContinuousVadProcessor {
 
     /// Process incoming audio samples and return any complete speech segments
     /// Handles resampling from input sample rate to 16kHz for VAD processing
+    /// Whether the processor currently considers itself mid-speech (including the
+    /// redemption window bridging a brief pause). Used by the pipeline to scope the
+    /// Audio Source energy accumulator to windows that actually belong to a speech
+    /// run, rather than unrelated silence or non-speech audio between segments.
+    pub fn is_in_speech(&self) -> bool {
+        self.in_speech
+    }
+
     pub fn process_audio(&mut self, samples: &[f32]) -> Result<Vec<SpeechSegment>> {
         // Resample to 16kHz if needed
         let resampled_audio = if self.sample_rate == 16000 {

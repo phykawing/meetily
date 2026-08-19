@@ -696,9 +696,10 @@ pub struct AudioPipeline {
     mixer: ProfessionalAudioMixer,
     // Recording sender for pre-mixed audio
     recording_sender_for_mixed: Option<mpsc::UnboundedSender<AudioChunk>>,
-    // AUDIO SOURCE HINT: accumulated mic/system energy since the last completed VAD
-    // segment, used to classify the next segment's Audio Source (see docs/adr/0001).
-    // Reset to zero once a segment is emitted.
+    // AUDIO SOURCE HINT: accumulated mic/system energy across windows VAD considers
+    // part of the current (or just-completed) speech run, used to classify that
+    // segment's Audio Source (see docs/adr/0001). Windows of unrelated non-speech
+    // audio are not accumulated. Reset to zero once a segment is emitted.
     segment_mic_energy: f64,
     segment_system_energy: f64,
 }
@@ -831,12 +832,6 @@ impl AudioPipeline {
                     // STEP 2: Mix audio in fixed windows when both streams have sufficient data
                     while self.ring_buffer.can_mix() {
                         if let Some((mic_window, sys_window)) = self.ring_buffer.extract_window() {
-                            // AUDIO SOURCE HINT: accumulate this window's mic/system energy
-                            // dominance (see docs/adr/0001) - cheap, no model involved, adds no
-                            // measurable latency to the recording path.
-                            self.segment_mic_energy += window_energy(&mic_window);
-                            self.segment_system_energy += window_energy(&sys_window);
-
                             // Simple mixing without aggressive ducking
                             let mixed_clean = self.mixer.mix_window(&mic_window, &sys_window);
 
@@ -849,6 +844,18 @@ impl AudioPipeline {
                             // STEP 3: Send mixed audio for transcription (VAD + Whisper)
                             match self.vad_processor.process_audio(&mixed_with_gain) {
                                 Ok(speech_segments) => {
+                                    // AUDIO SOURCE HINT: only accumulate this window's mic/system
+                                    // energy dominance (see docs/adr/0001) while VAD considers it
+                                    // part of an active or just-completed speech run - windows of
+                                    // unrelated non-speech audio (e.g. a video playing before
+                                    // anyone talks) must not pollute the next segment's
+                                    // classification. Cheap, no model involved, adds no measurable
+                                    // latency to the recording path.
+                                    if self.vad_processor.is_in_speech() || !speech_segments.is_empty() {
+                                        self.segment_mic_energy += window_energy(&mic_window);
+                                        self.segment_system_energy += window_energy(&sys_window);
+                                    }
+
                                     if !speech_segments.is_empty() {
                                         // Classify from energy accumulated since the last emitted
                                         // segment, then reset for the next one.

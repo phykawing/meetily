@@ -6,6 +6,15 @@
 // concept, which identifies a human voice rather than a capture stream.
 
 /// Which capture stream dominated a transcript segment's mixed audio.
+///
+/// Known limitation: dominance is judged from raw window energy, but only the
+/// microphone stream is loudness-normalized (EBU R128, see `audio_processing.rs`)
+/// before this comparison - system audio is not. A quiet mic speaker against loud
+/// non-speech system audio can therefore be misclassified. This is accepted rather
+/// than fixed here because correcting it would mean running a second normalizer over
+/// system audio just to feed this hint (touching the shared mixing/recording path is
+/// out of scope for it); per docs/adr/0001 this is deliberately a cheap, approximate
+/// hint that the post-meeting diarization pass overwrites with a real Speaker label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioSource {
     Mic,
