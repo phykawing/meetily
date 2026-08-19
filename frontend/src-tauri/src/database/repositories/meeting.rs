@@ -264,11 +264,78 @@ async fn delete_meeting_with_transaction(
         .execute(&mut *transaction)
         .await?;
 
-    // 4. Finally, delete the meeting
+    // 4. Delete cached transcript renderings (see rendering.rs / phykawing/meetily#8).
+    // Explicit, like the deletes above, rather than relying on the table's
+    // `ON DELETE CASCADE`: this app does not enable SQLite foreign key enforcement, so an
+    // unenforced CASCADE would silently leave orphaned renderings behind.
+    sqlx::query("DELETE FROM transcript_renderings WHERE meeting_id = ?")
+        .bind(meeting_id)
+        .execute(&mut *transaction)
+        .await?;
+
+    // 5. Finally, delete the meeting
     let result = sqlx::query("DELETE FROM meetings WHERE id = ?")
         .bind(meeting_id)
         .execute(&mut *transaction)
         .await?;
 
     Ok(result.rows_affected() > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::TranscriptSegment;
+    use crate::database::repositories::rendering::RenderingRepository;
+    use crate::database::repositories::transcript::TranscriptsRepository;
+
+    async fn migrated_pool() -> SqlitePool {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        pool
+    }
+
+    /// `transcript_renderings` declares `ON DELETE CASCADE`, but this app never enables
+    /// SQLite foreign key enforcement, so that constraint is inert. Deleting a meeting must
+    /// therefore clean up its cached rendering explicitly, the same way it does for every
+    /// other per-meeting table, or the rendering (a full copy of that meeting's content)
+    /// survives the meeting it belonged to.
+    #[tokio::test]
+    async fn deleting_a_meeting_removes_its_cached_rendering() {
+        let pool = migrated_pool().await;
+
+        let meeting_id = TranscriptsRepository::save_transcript(
+            &pool,
+            "Test meeting",
+            &[TranscriptSegment {
+                id: "seg-0".to_string(),
+                text: "係咁㗎啦".to_string(),
+                timestamp: "0".to_string(),
+                audio_start_time: Some(0.0),
+                audio_end_time: Some(1.0),
+                duration: Some(1.0),
+            }],
+            None,
+        )
+        .await
+        .unwrap();
+
+        RenderingRepository::save_rendering(&pool, &meeting_id, "是這樣的", "fp-1")
+            .await
+            .unwrap();
+        assert!(RenderingRepository::get_cached_rendering(&pool, &meeting_id)
+            .await
+            .unwrap()
+            .is_some());
+
+        let deleted = MeetingsRepository::delete_meeting(&pool, &meeting_id)
+            .await
+            .unwrap();
+        assert!(deleted);
+
+        assert!(RenderingRepository::get_cached_rendering(&pool, &meeting_id)
+            .await
+            .unwrap()
+            .is_none());
+    }
 }

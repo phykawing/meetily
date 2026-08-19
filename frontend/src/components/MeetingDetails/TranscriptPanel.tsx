@@ -4,7 +4,13 @@ import { Transcript, TranscriptSegmentData } from '@/types';
 import { TranscriptView } from '@/components/TranscriptView';
 import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptView';
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
-import { useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { toast } from 'sonner';
+import { Button } from '@/components/ui/button';
+import { Loader2 } from 'lucide-react';
+
+type WrittenForm = 'colloquial' | 'written';
 
 interface TranscriptPanelProps {
   transcripts: Transcript[];
@@ -64,37 +70,212 @@ export function TranscriptPanel({
     }));
   }, [transcripts, usePagination, segments]);
 
+  // Written Form: 口語 (verbatim, the Canonical Transcript) is the default view. 書面語 is a
+  // cached Rendering produced by the local model on demand — see phykawing/meetily#8 and
+  // docs/adr/0002-canonical-transcript-is-verbatim-colloquial.md.
+  const [writtenForm, setWrittenForm] = useState<WrittenForm>('colloquial');
+  const [renderedText, setRenderedText] = useState<string | null>(null);
+  const [isLoadingRendering, setIsLoadingRendering] = useState(false);
+  const [renderingError, setRenderingError] = useState<string | null>(null);
+
+  // Tracks which meeting is currently being viewed, so a rendering fetch that resolves
+  // after the user has already switched to a different meeting doesn't clobber that
+  // meeting's state (the fetch itself has no built-in cancellation).
+  const currentMeetingIdRef = useRef(meetingId);
+  useEffect(() => {
+    currentMeetingIdRef.current = meetingId;
+  }, [meetingId]);
+
+  // Load the persisted per-meeting preference whenever the viewed meeting changes.
+  useEffect(() => {
+    setRenderedText(null);
+    setRenderingError(null);
+
+    if (!meetingId) {
+      setWrittenForm('colloquial');
+      return;
+    }
+
+    let cancelled = false;
+    invoke<string>('get_written_form', { meetingId })
+      .then((form) => {
+        if (!cancelled) setWrittenForm(form === 'written' ? 'written' : 'colloquial');
+      })
+      .catch((error) => {
+        console.error('Failed to load written form preference:', error);
+        if (!cancelled) setWrittenForm('colloquial');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [meetingId]);
+
+  const fetchRendering = useCallback(async () => {
+    if (!meetingId) return;
+    const requestedFor = meetingId;
+    setIsLoadingRendering(true);
+    setRenderingError(null);
+    try {
+      const text = await invoke<string>('get_transcript_rendering', { meetingId: requestedFor });
+      if (currentMeetingIdRef.current === requestedFor) {
+        setRenderedText(text);
+      }
+    } catch (error) {
+      if (currentMeetingIdRef.current === requestedFor) {
+        setRenderingError(
+          typeof error === 'string' ? error : '書面語 rendering is currently unavailable.'
+        );
+      }
+    } finally {
+      if (currentMeetingIdRef.current === requestedFor) {
+        setIsLoadingRendering(false);
+      }
+    }
+  }, [meetingId]);
+
+  // Generate (or fetch the cached) rendering the first time the view switches to 書面語 for
+  // this meeting. Once loaded, `renderedText` is kept across toggling back to 口語 and
+  // forth again — per the "toggling back and forth does not regenerate it" requirement —
+  // and is only cleared by a meeting change (above) or a transcript refetch (below).
+  useEffect(() => {
+    if (
+      writtenForm === 'written' &&
+      meetingId &&
+      renderedText === null &&
+      !isLoadingRendering &&
+      !renderingError
+    ) {
+      fetchRendering();
+    }
+  }, [writtenForm, meetingId, renderedText, isLoadingRendering, renderingError, fetchRendering]);
+
+  const handleSelectWrittenForm = useCallback(
+    async (next: WrittenForm) => {
+      if (next === writtenForm || !meetingId) return;
+
+      const previous = writtenForm;
+      setWrittenForm(next);
+
+      try {
+        await invoke('set_written_form', { meetingId, writtenForm: next });
+      } catch (error) {
+        console.error('Failed to save written form preference:', error);
+        toast.error('Failed to save Written Form preference');
+        setWrittenForm(previous);
+      }
+    },
+    [writtenForm, meetingId]
+  );
+
+  // Retranscription rewrites the Canonical Transcript in place (the panel does not remount
+  // for it, unlike a meeting switch), so any cached rendering it produced is stale. This
+  // wraps the caller-supplied refetch to drop the local rendering cache before reloading —
+  // the next switch to 書面語 will regenerate against the new transcript.
+  const handleRefetchTranscripts = useCallback(async () => {
+    setRenderedText(null);
+    setRenderingError(null);
+    if (onRefetchTranscripts) {
+      await onRefetchTranscripts();
+    }
+  }, [onRefetchTranscripts]);
+
+  // The copy button copies whichever view is on screen. When 書面語 is selected but not yet
+  // ready (still generating, or failed), copying the colloquial text instead would silently
+  // hand back something other than what's displayed, so this refuses rather than falling back.
+  const handleCopy = useCallback(() => {
+    if (writtenForm === 'written') {
+      if (!renderedText) {
+        toast.error('書面語 rendering is not ready to copy yet.');
+        return;
+      }
+      navigator.clipboard.writeText(renderedText);
+      toast.success('Transcript copied to clipboard');
+      return;
+    }
+    onCopyTranscript();
+  }, [writtenForm, renderedText, onCopyTranscript]);
+
+  const canToggleWrittenForm = !isRecording && !!meetingId && convertedSegments.length > 0;
+
   return (
     <div className="hidden md:flex md:w-1/4 lg:w-1/3 min-w-0 border-r border-gray-200 bg-white flex-col relative shrink-0">
       {/* Title area */}
-      <div className="p-4 border-b border-gray-200">
+      <div className="p-4 border-b border-gray-200 space-y-2">
         <TranscriptButtonGroup
           transcriptCount={usePagination ? (totalCount ?? convertedSegments.length) : (transcripts?.length || 0)}
-          onCopyTranscript={onCopyTranscript}
+          onCopyTranscript={handleCopy}
           onOpenMeetingFolder={onOpenMeetingFolder}
           meetingId={meetingId}
           meetingFolderPath={meetingFolderPath}
-          onRefetchTranscripts={onRefetchTranscripts}
+          onRefetchTranscripts={handleRefetchTranscripts}
         />
+
+        {meetingId && (
+          <div className="flex items-center justify-center gap-1" role="group" aria-label="Written Form">
+            <Button
+              size="sm"
+              variant={writtenForm === 'colloquial' ? 'default' : 'outline'}
+              className="flex-1 text-xs"
+              disabled={!canToggleWrittenForm}
+              onClick={() => handleSelectWrittenForm('colloquial')}
+              title="口語 — the verbatim transcript of what was actually said"
+            >
+              口語
+            </Button>
+            <Button
+              size="sm"
+              variant={writtenForm === 'written' ? 'default' : 'outline'}
+              className="flex-1 text-xs"
+              disabled={!canToggleWrittenForm}
+              onClick={() => handleSelectWrittenForm('written')}
+              title="書面語 — rewritten for reading and sharing, cached and regenerated from the transcript"
+            >
+              書面語
+            </Button>
+          </div>
+        )}
       </div>
 
       {/* Transcript content - use virtualized view for better performance */}
       <div className="flex-1 overflow-hidden pb-4">
-        <VirtualizedTranscriptView
-          segments={convertedSegments}
-          isRecording={isRecording}
-          isPaused={false}
-          isProcessing={false}
-          isStopping={false}
-          enableStreaming={false}
-          showConfidence={true}
-          disableAutoScroll={disableAutoScroll}
-          hasMore={hasMore}
-          isLoadingMore={isLoadingMore}
-          totalCount={totalCount}
-          loadedCount={loadedCount}
-          onLoadMore={onLoadMore}
-        />
+        {writtenForm === 'written' ? (
+          <div className="h-full overflow-y-auto px-4 py-3">
+            {isLoadingRendering && (
+              <div className="flex items-center gap-2 text-sm text-gray-500">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Generating 書面語 rendering with the local model…
+              </div>
+            )}
+            {!isLoadingRendering && renderingError && (
+              <div className="space-y-2">
+                <p className="text-sm text-red-600">{renderingError}</p>
+                <Button size="sm" variant="outline" onClick={fetchRendering}>
+                  Try again
+                </Button>
+              </div>
+            )}
+            {!isLoadingRendering && !renderingError && renderedText && (
+              <p className="whitespace-pre-wrap text-sm text-gray-800">{renderedText}</p>
+            )}
+          </div>
+        ) : (
+          <VirtualizedTranscriptView
+            segments={convertedSegments}
+            isRecording={isRecording}
+            isPaused={false}
+            isProcessing={false}
+            isStopping={false}
+            enableStreaming={false}
+            showConfidence={true}
+            disableAutoScroll={disableAutoScroll}
+            hasMore={hasMore}
+            isLoadingMore={isLoadingMore}
+            totalCount={totalCount}
+            loadedCount={loadedCount}
+            onLoadMore={onLoadMore}
+          />
+        )}
       </div>
 
       {/* Custom prompt input at bottom of transcript section */}

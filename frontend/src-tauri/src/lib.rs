@@ -49,6 +49,7 @@ pub mod anthropic;
 pub mod groq;
 pub mod openrouter;
 pub mod parakeet_engine;
+pub mod rendering;
 pub mod script;
 pub mod state;
 pub mod summary;
@@ -689,6 +690,10 @@ pub fn run() {
             summary::summary_engine::commands::builtin_ai_is_model_ready,
             summary::summary_engine::commands::builtin_ai_get_available_summary_model,
             summary::summary_engine::commands::builtin_ai_get_recommended_model,
+            // Written Form rendering commands
+            rendering::commands::get_written_form,
+            rendering::commands::set_written_form,
+            rendering::commands::get_transcript_rendering,
             openrouter::get_openrouter_models,
             audio::recording_preferences::get_recording_preferences,
             audio::recording_preferences::set_recording_preferences,

@@ -78,7 +78,10 @@ struct EnglishSummaryCache {
     output_language: Option<String>,
 }
 
-fn stable_text_fingerprint(text: &str) -> String {
+/// FNV-1a text fingerprint. `pub(crate)` so `crate::rendering::fingerprint_segments` can
+/// reuse it instead of a second, independently-implemented hash — deterministic and stable
+/// across Rust versions, unlike `std::collections::hash_map::DefaultHasher`.
+pub(crate) fn stable_text_fingerprint(text: &str) -> String {
     const FNV_OFFSET: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x100000001b3;
 
