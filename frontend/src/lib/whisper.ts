@@ -7,6 +7,7 @@ export interface ModelInfo {
   speed: ProcessingSpeed;
   status: ModelStatus;
   description?: string;
+  supports_cantonese: boolean;
 }
 
 export type ModelAccuracy = 'High' | 'Good' | 'Decent';

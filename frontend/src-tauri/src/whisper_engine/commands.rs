@@ -1,6 +1,7 @@
 use crate::database::repositories::setting::SettingsRepository;
 use crate::state::AppState;
 use crate::whisper_engine::custom_models::{self, CustomModel};
+use crate::whisper_engine::language;
 use crate::whisper_engine::{ModelInfo, WhisperEngine};
 use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
@@ -117,6 +118,7 @@ fn discover_models_standalone() -> Result<Vec<ModelInfo>, String> {
             accuracy: accuracy.to_string(),
             speed: speed.to_string(),
             description: description.to_string(),
+            supports_cantonese: language::is_cantonese_capable_builtin(name),
         });
     }
 

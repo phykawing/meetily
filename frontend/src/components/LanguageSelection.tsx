@@ -1,33 +1,90 @@
 import React, { useState, useEffect } from 'react';
 import { Globe } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
 import Analytics from '@/lib/analytics';
 import { toast } from 'sonner';
 import { useConfig } from '@/contexts/ConfigContext';
-import { LANGUAGES } from '@/constants/languages';
+import { LANGUAGES, CANTONESE_LANGUAGE_CODE } from '@/constants/languages';
+import { cantoneseUnavailableReason } from '@/lib/cantonese-capability';
+import type { ModelInfo } from '@/lib/whisper';
 
 interface LanguageSelectionProps {
   selectedLanguage: string;
   onLanguageChange: (language: string) => void;
   disabled?: boolean;
   provider?: 'localWhisper' | 'parakeet' | 'deepgram' | 'elevenLabs' | 'groq' | 'openai';
+  /** The currently configured Whisper model name, used to judge Cantonese capability. */
+  modelName?: string;
 }
 
 export function LanguageSelection({
   selectedLanguage,
   onLanguageChange,
   disabled = false,
-  provider = 'localWhisper'
+  provider = 'localWhisper',
+  modelName
 }: LanguageSelectionProps) {
   const [saving, setSaving] = useState(false);
+  const [whisperModels, setWhisperModels] = useState<ModelInfo[]>([]);
   const { setSelectedLanguage } = useConfig();
 
   // Parakeet only supports auto-detection (doesn't support manual language selection)
   const isParakeet = provider === 'parakeet';
+
+  useEffect(() => {
+    if (provider !== 'localWhisper') return;
+    let cancelled = false;
+    let retried = false;
+
+    const fetchModels = () => {
+      invoke<ModelInfo[]>('whisper_get_available_models')
+        .then((models) => {
+          if (!cancelled) setWhisperModels(models);
+        })
+        .catch((err) => {
+          console.error('Failed to fetch Whisper models for language capability check:', err);
+          // A single transient IPC failure shouldn't strand Cantonese as permanently
+          // "unavailable" for the rest of this mount — retry once before giving up.
+          if (!cancelled && !retried) {
+            retried = true;
+            setTimeout(fetchModels, 1000);
+          }
+        });
+    };
+    fetchModels();
+
+    return () => { cancelled = true; };
+  }, [provider]);
+
+  // The capability gate is specific to the app's local providers (Whisper's per-model
+  // rule, Parakeet's blanket lack of language selection). Cloud providers aren't governed
+  // by it, so Cantonese behaves like any other language for them.
+  const isLocalProvider = provider === 'localWhisper' || isParakeet;
+  const currentModel = whisperModels.find((m) => m.name === modelName);
+  const cantoneseReason = isLocalProvider
+    ? cantoneseUnavailableReason({
+        isParakeet,
+        modelName,
+        supportsCantonese: currentModel?.supports_cantonese,
+      })
+    : null;
+
+  // Switching to a model that can't serve Cantonese (or one not yet identified) must not
+  // leave a stale selection behind a disabled option — that reaches the backend as an
+  // unsupported-language error instead of falling back cleanly.
+  useEffect(() => {
+    if (cantoneseReason && selectedLanguage === CANTONESE_LANGUAGE_CODE) {
+      setSelectedLanguage('auto');
+      onLanguageChange('auto');
+    }
+  }, [cantoneseReason, selectedLanguage]);
+
   const availableLanguages = isParakeet
-    ? LANGUAGES.filter(lang => lang.code === 'auto' || lang.code === 'auto-translate')
+    ? LANGUAGES.filter(lang => lang.code === 'auto' || lang.code === 'auto-translate' || lang.code === CANTONESE_LANGUAGE_CODE)
     : LANGUAGES;
 
   const handleLanguageChange = async (languageCode: string) => {
+    if (languageCode === CANTONESE_LANGUAGE_CODE && cantoneseReason) return;
     setSaving(true);
     try {
       // Save language preference to localStorage and sync to backend
@@ -81,7 +138,12 @@ export function LanguageSelection({
           className="w-full px-3 py-2 text-sm bg-white border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 disabled:bg-gray-50 disabled:text-gray-500"
         >
           {availableLanguages.map((language) => (
-            <option key={language.code} value={language.code}>
+            <option
+              key={language.code}
+              value={language.code}
+              disabled={language.code === CANTONESE_LANGUAGE_CODE && !!cantoneseReason}
+              title={language.code === CANTONESE_LANGUAGE_CODE ? cantoneseReason ?? undefined : undefined}
+            >
               {language.name}
               {language.code !== 'auto' && language.code !== 'auto-translate' && ` (${language.code})`}
             </option>
@@ -93,6 +155,13 @@ export function LanguageSelection({
           <div className="p-2 bg-amber-50 border border-amber-200 rounded text-amber-800">
             <p className="font-medium">ℹ️ Parakeet Language Support</p>
             <p className="mt-1 text-xs">Parakeet currently only supports automatic language detection. Manual language selection is not available. Use Whisper if you need to specify a particular language.</p>
+          </div>
+        )}
+
+        {/* Cantonese capability note */}
+        {cantoneseReason && (
+          <div className="p-2 bg-gray-50 border border-gray-200 rounded text-gray-700">
+            <p className="text-xs"><strong>Cantonese:</strong> {cantoneseReason}</p>
           </div>
         )}
 

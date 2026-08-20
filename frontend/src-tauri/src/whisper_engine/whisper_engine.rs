@@ -33,6 +33,9 @@ pub struct ModelInfo {
     pub speed: String,
     pub status: ModelStatus,
     pub description: String,
+    /// Whether this model can be trusted with Cantonese — see `language::is_cantonese_capable_builtin`
+    /// for stock models, or the registry's `supports_cantonese` flag for custom ones.
+    pub supports_cantonese: bool,
 }
 
 pub struct WhisperEngine {
@@ -251,6 +254,7 @@ impl WhisperEngine {
                 speed: speed.to_string(),
                 status,
                 description: description.to_string(),
+                supports_cantonese: language::is_cantonese_capable_builtin(name),
             };
             
             models.push(model_info);
@@ -285,6 +289,7 @@ impl WhisperEngine {
                 speed: "Custom".to_string(),
                 status,
                 description: custom.description,
+                supports_cantonese: custom.supports_cantonese,
             });
         }
 

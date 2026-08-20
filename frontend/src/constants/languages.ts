@@ -3,12 +3,17 @@ export interface Language {
   name: string;
 }
 
+// The UI code for Cantonese. Not always what reaches whisper.cpp — the engine resolves it
+// per loaded model. See frontend/src-tauri/src/whisper_engine/language.rs.
+export const CANTONESE_LANGUAGE_CODE = 'yue';
+
 // ISO 639-1 language codes supported by Whisper
 export const LANGUAGES: Language[] = [
   { code: 'auto', name: 'Auto Detect (Original Language)' },
   { code: 'auto-translate', name: 'Auto Detect (Translate to English)' },
   { code: 'en', name: 'English' },
-  { code: 'zh', name: 'Chinese' },
+  { code: 'zh', name: 'Chinese (Mandarin)' },
+  { code: CANTONESE_LANGUAGE_CODE, name: 'Cantonese' },
   { code: 'de', name: 'German' },
   { code: 'es', name: 'Spanish' },
   { code: 'ru', name: 'Russian' },

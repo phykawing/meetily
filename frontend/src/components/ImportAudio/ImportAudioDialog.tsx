@@ -35,8 +35,9 @@ import { useConfig } from '@/contexts/ConfigContext';
 import { useImportAudio, ImportResult } from '@/hooks/useImportAudio';
 import { useRouter } from 'next/navigation';
 import { useSidebar } from '../Sidebar/SidebarProvider';
-import { LANGUAGES } from '@/constants/languages';
+import { LANGUAGES, CANTONESE_LANGUAGE_CODE } from '@/constants/languages';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
+import { cantoneseUnavailableReason } from '@/lib/cantonese-capability';
 
 
 interface ImportAudioDialogProps {
@@ -170,12 +171,26 @@ export function ImportAudioDialog({
     return availableModels.find((m) => m.provider === provider && m.name === name);
   }, [selectedModelKey, availableModels]);
   const isParakeetModel = selectedModel?.provider === 'parakeet';
+  const cantoneseReason = cantoneseUnavailableReason({
+    isParakeet: isParakeetModel,
+    modelName: selectedModel?.name,
+    supportsCantonese: selectedModel?.supportsCantonese,
+  });
 
   useEffect(() => {
     if (isParakeetModel && selectedLang !== 'auto') {
       setSelectedLang('auto');
     }
   }, [isParakeetModel, selectedLang]);
+
+  // Switching to a model that can't serve Cantonese (or one not yet identified) must not
+  // leave a stale 'yue' selection sitting behind a disabled option — that reaches the
+  // backend as an unsupported-language error instead of falling back cleanly.
+  useEffect(() => {
+    if (cantoneseReason && selectedLang === CANTONESE_LANGUAGE_CODE) {
+      setSelectedLang('auto');
+    }
+  }, [cantoneseReason, selectedLang]);
 
   const handleSelectFile = async () => {
     const info = await selectFile();
@@ -355,12 +370,20 @@ export function ImportAudioDialog({
                             </SelectTrigger>
                             <SelectContent className="max-h-60">
                               {LANGUAGES.map((lang) => (
-                                <SelectItem key={lang.code} value={lang.code}>
+                                <SelectItem
+                                  key={lang.code}
+                                  value={lang.code}
+                                  disabled={lang.code === CANTONESE_LANGUAGE_CODE && !!cantoneseReason}
+                                  title={lang.code === CANTONESE_LANGUAGE_CODE ? cantoneseReason ?? undefined : undefined}
+                                >
                                   {lang.name}
                                 </SelectItem>
                               ))}
                             </SelectContent>
                           </Select>
+                          {cantoneseReason && (
+                            <p className="text-xs text-amber-700">Cantonese: {cantoneseReason}</p>
+                          )}
                         </div>
                       ) : (
                         <div className="space-y-2">
@@ -371,6 +394,7 @@ export function ImportAudioDialog({
                           <p className="text-xs text-muted-foreground">
                             Language selection isn't supported for Parakeet. It always uses automatic detection.
                           </p>
+                          <p className="text-xs text-amber-700">Cantonese: {cantoneseReason}</p>
                         </div>
                       )}
 
@@ -445,7 +469,7 @@ export function ImportAudioDialog({
               <Button
                 onClick={handleStartImport}
                 className="bg-blue-600 hover:bg-blue-700"
-                disabled={!fileInfo}
+                disabled={!fileInfo || (selectedLang === CANTONESE_LANGUAGE_CODE && !!cantoneseReason)}
               >
                 <Upload className="h-4 w-4 mr-2" />
                 Import

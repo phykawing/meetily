@@ -5,6 +5,7 @@ export interface RawModelInfo {
   name: string;
   size_mb: number;
   status: 'Available' | 'Missing' | { Downloading: { progress: number } } | { Error: string };
+  supports_cantonese?: boolean;
 }
 
 export interface ModelOption {
@@ -12,6 +13,7 @@ export interface ModelOption {
   name: string;
   displayName: string;
   size_mb: number;
+  supportsCantonese: boolean;
 }
 
 interface TranscriptModelConfig {
@@ -55,6 +57,7 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
           name: m.name,
           displayName: `🏠 Whisper: ${m.name}`,
           size_mb: m.size_mb,
+          supportsCantonese: m.supports_cantonese ?? false,
         }));
       allModels.push(...availableWhisper);
     } catch (err) {
@@ -71,6 +74,7 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
           name: m.name,
           displayName: `⚡ Parakeet: ${m.name}`,
           size_mb: m.size_mb,
+          supportsCantonese: false,
         }));
       allModels.push(...availableParakeet);
     } catch (err) {

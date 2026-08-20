@@ -13,4 +13,11 @@ describe("LANGUAGES", () => {
     expect(codes).toContain("auto-translate");
     expect(codes).toContain("zh");
   });
+
+  test("Chinese names Mandarin explicitly, and Cantonese is a separate entry", () => {
+    const zh = LANGUAGES.find((lang) => lang.code === "zh");
+    const yue = LANGUAGES.find((lang) => lang.code === "yue");
+    expect(zh?.name).toBe("Chinese (Mandarin)");
+    expect(yue?.name).toBe("Cantonese");
+  });
 });
