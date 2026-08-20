@@ -260,6 +260,47 @@ impl SettingsRepository {
         Ok(())
     }
 
+    /// Gets the persisted diarization model-download consent token (see
+    /// `crate::diarization::consent::DiarizationConsent`). `None` when the user has not
+    /// been asked yet.
+    pub async fn get_diarization_consent(
+        pool: &SqlitePool,
+    ) -> std::result::Result<Option<String>, sqlx::Error> {
+        let consent: Option<Option<String>> =
+            sqlx::query_scalar("SELECT diarizationConsent FROM settings WHERE id = '1' LIMIT 1")
+                .fetch_optional(pool)
+                .await?;
+        Ok(consent.flatten())
+    }
+
+    /// Saves the diarization model-download consent token.
+    ///
+    /// Updates the existing row when one is present. Only falls back to inserting a fresh
+    /// row (with the app's documented default provider) when no settings exist at all yet.
+    pub async fn save_diarization_consent(
+        pool: &SqlitePool,
+        consent: &str,
+    ) -> std::result::Result<(), sqlx::Error> {
+        let result = sqlx::query("UPDATE settings SET diarizationConsent = $1 WHERE id = '1'")
+            .bind(consent)
+            .execute(pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            sqlx::query(
+                r#"
+                INSERT INTO settings (id, provider, model, whisperModel, diarizationConsent)
+                VALUES ('1', 'openai', 'gpt-4o-2024-11-20', 'large-v3', $1)
+                "#,
+            )
+            .bind(consent)
+            .execute(pool)
+            .await?;
+        }
+
+        Ok(())
+    }
+
     pub async fn save_transcript_api_key(
         pool: &SqlitePool,
         provider: &str,
@@ -525,6 +566,30 @@ mod tests {
         assert_eq!(
             SettingsRepository::get_script_setting(&pool).await.unwrap().as_deref(),
             Some("simplified")
+        );
+    }
+
+    #[tokio::test]
+    async fn diarization_consent_round_trips() {
+        let pool = migrated_pool().await;
+
+        assert_eq!(SettingsRepository::get_diarization_consent(&pool).await.unwrap(), None);
+
+        SettingsRepository::save_diarization_consent(&pool, "granted")
+            .await
+            .unwrap();
+        assert_eq!(
+            SettingsRepository::get_diarization_consent(&pool).await.unwrap().as_deref(),
+            Some("granted")
+        );
+
+        // Overwriting must not disturb an unrelated column already set on the same row.
+        SettingsRepository::save_model_config(&pool, "openai", "gpt-4o", "large-v3", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            SettingsRepository::get_diarization_consent(&pool).await.unwrap().as_deref(),
+            Some("granted")
         );
     }
 

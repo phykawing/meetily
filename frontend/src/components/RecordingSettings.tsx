@@ -3,6 +3,7 @@ import { Switch } from '@/components/ui/switch';
 import { FolderOpen } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { DeviceSelection, SelectedDevices } from '@/components/DeviceSelection';
+import { SpeakerDetectionSettings } from '@/components/SpeakerDetectionSettings';
 import Analytics from '@/lib/analytics';
 import { toast } from 'sonner';
 
@@ -247,6 +248,8 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
           </div>
         </div>
       </div>
+
+      <SpeakerDetectionSettings />
     </div>
   );
 }
