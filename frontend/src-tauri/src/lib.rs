@@ -700,6 +700,8 @@ pub fn run() {
             rendering::commands::get_written_form,
             rendering::commands::set_written_form,
             rendering::commands::get_transcript_rendering,
+            rendering::commands::get_rendering_provider,
+            rendering::commands::set_rendering_provider,
             openrouter::get_openrouter_models,
             audio::recording_preferences::get_recording_preferences,
             audio::recording_preferences::set_recording_preferences,

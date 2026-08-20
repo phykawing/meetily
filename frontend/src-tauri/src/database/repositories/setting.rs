@@ -301,6 +301,46 @@ impl SettingsRepository {
         Ok(())
     }
 
+    /// Gets the persisted Rendering provider token (see
+    /// `crate::rendering::RenderingProvider`). `None` when the user has not chosen yet.
+    pub async fn get_rendering_provider(
+        pool: &SqlitePool,
+    ) -> std::result::Result<Option<String>, sqlx::Error> {
+        let provider: Option<Option<String>> =
+            sqlx::query_scalar("SELECT renderingProvider FROM settings WHERE id = '1' LIMIT 1")
+                .fetch_optional(pool)
+                .await?;
+        Ok(provider.flatten())
+    }
+
+    /// Saves the Rendering provider token.
+    ///
+    /// Updates the existing row when one is present. Only falls back to inserting a fresh
+    /// row (with the app's documented default provider) when no settings exist at all yet.
+    pub async fn save_rendering_provider(
+        pool: &SqlitePool,
+        rendering_provider: &str,
+    ) -> std::result::Result<(), sqlx::Error> {
+        let result = sqlx::query("UPDATE settings SET renderingProvider = $1 WHERE id = '1'")
+            .bind(rendering_provider)
+            .execute(pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            sqlx::query(
+                r#"
+                INSERT INTO settings (id, provider, model, whisperModel, renderingProvider)
+                VALUES ('1', 'openai', 'gpt-4o-2024-11-20', 'large-v3', $1)
+                "#,
+            )
+            .bind(rendering_provider)
+            .execute(pool)
+            .await?;
+        }
+
+        Ok(())
+    }
+
     pub async fn save_transcript_api_key(
         pool: &SqlitePool,
         provider: &str,
@@ -590,6 +630,30 @@ mod tests {
         assert_eq!(
             SettingsRepository::get_diarization_consent(&pool).await.unwrap().as_deref(),
             Some("granted")
+        );
+    }
+
+    #[tokio::test]
+    async fn rendering_provider_round_trips() {
+        let pool = migrated_pool().await;
+
+        assert_eq!(SettingsRepository::get_rendering_provider(&pool).await.unwrap(), None);
+
+        SettingsRepository::save_rendering_provider(&pool, "summary_provider")
+            .await
+            .unwrap();
+        assert_eq!(
+            SettingsRepository::get_rendering_provider(&pool).await.unwrap().as_deref(),
+            Some("summary_provider")
+        );
+
+        // Overwriting must not disturb an unrelated column already set on the same row.
+        SettingsRepository::save_model_config(&pool, "openai", "gpt-4o", "large-v3", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            SettingsRepository::get_rendering_provider(&pool).await.unwrap().as_deref(),
+            Some("summary_provider")
         );
     }
 

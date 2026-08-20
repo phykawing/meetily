@@ -48,6 +48,45 @@ impl Default for WrittenForm {
     }
 }
 
+/// Which LLM provider performs a Rendering. A Rendering is a full-transcript LLM pass, so
+/// this is a distinct, explicit privacy decision from the summary provider setting — see
+/// docs/adr/0002 and phykawing/meetily#15.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderingProvider {
+    /// The app's local Built-in AI model. The default — no transcript text leaves the
+    /// machine.
+    Local,
+    /// Whichever provider is currently configured for summaries. May be a cloud provider;
+    /// the UI warns explicitly before this can be selected.
+    SummaryProvider,
+}
+
+impl RenderingProvider {
+    /// Token stored in the database.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RenderingProvider::Local => "local",
+            RenderingProvider::SummaryProvider => "summary_provider",
+        }
+    }
+
+    /// Resolves a stored token into a setting. Unrecognized or absent values fall back to
+    /// `Local` — the privacy-safe default, since an unrecognized value must never be
+    /// treated as consent to use a remote provider.
+    pub fn from_stored(token: Option<&str>) -> Self {
+        match token {
+            Some("summary_provider") => RenderingProvider::SummaryProvider,
+            _ => RenderingProvider::Local,
+        }
+    }
+}
+
+impl Default for RenderingProvider {
+    fn default() -> Self {
+        RenderingProvider::Local
+    }
+}
+
 /// Fingerprints a Canonical Transcript's ordered segment texts, so a cached Rendering can be
 /// checked for staleness without keeping a second full copy of the source text around.
 /// Reuses `summary::service::stable_text_fingerprint` (FNV-1a) rather than a second,
@@ -135,6 +174,22 @@ mod tests {
         assert_eq!(
             WrittenForm::from_stored(Some("bogus")),
             WrittenForm::Colloquial
+        );
+    }
+
+    #[test]
+    fn rendering_provider_round_trips_through_stored_tokens() {
+        for provider in [RenderingProvider::Local, RenderingProvider::SummaryProvider] {
+            assert_eq!(RenderingProvider::from_stored(Some(provider.as_str())), provider);
+        }
+    }
+
+    #[test]
+    fn missing_or_unknown_rendering_provider_token_defaults_to_local() {
+        assert_eq!(RenderingProvider::from_stored(None), RenderingProvider::Local);
+        assert_eq!(
+            RenderingProvider::from_stored(Some("bogus")),
+            RenderingProvider::Local
         );
     }
 
