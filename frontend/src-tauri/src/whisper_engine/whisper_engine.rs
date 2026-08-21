@@ -1338,4 +1338,17 @@ mod tests {
         assert!(!translate);
         assert_eq!(prompt.as_deref(), Some(language::CANTONESE_PROMPT_SEED));
     }
+
+    /// Confirms a locally converted ggml file loads through the exact whisper.cpp build
+    /// whisper-rs-sys vendors, not just upstream's own `whisper-cli`. Opt-in: point
+    /// `MEETILY_TEST_MODEL_PATH` at a converted file (see scripts/convert-whisper-to-ggml.md)
+    /// and run with `cargo test -p meetily -- --ignored load_converted_model_from_env_path`.
+    #[test]
+    #[ignore]
+    fn load_converted_model_from_env_path() {
+        let path = std::env::var("MEETILY_TEST_MODEL_PATH")
+            .expect("set MEETILY_TEST_MODEL_PATH to a converted ggml file");
+        WhisperContext::new_with_params(&path, WhisperContextParameters::default())
+            .unwrap_or_else(|e| panic!("failed to load {path}: {e}"));
+    }
 }
