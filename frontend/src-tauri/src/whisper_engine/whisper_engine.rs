@@ -1351,4 +1351,85 @@ mod tests {
         WhisperContext::new_with_params(&path, WhisperContextParameters::default())
             .unwrap_or_else(|e| panic!("failed to load {path}: {e}"));
     }
+
+    /// Runs one transcription through the real engine path (`resolve_decoding` +
+    /// `transcribe_audio_with_confidence`) for issue #13's side-by-side Cantonese
+    /// evaluation. Not a correctness assertion — it prints the transcript so candidates can
+    /// be compared by hand. A model name with no `MEETILY_TEST_ENGINE_LANGUAGE` exercises the
+    /// builtin large-v3 zh+prompt path; setting it registers the model as a custom candidate
+    /// declaring that token first, exactly like `custom_models::add` (issue #12).
+    ///
+    /// ```text
+    /// MEETILY_TEST_MODEL_PATH=<ggml file> \
+    /// MEETILY_TEST_AUDIO_PATH=<audio file> \
+    /// MEETILY_TEST_MODEL_NAME=<label> \
+    /// MEETILY_TEST_ENGINE_LANGUAGE=<token, omit for the builtin path> \
+    /// MEETILY_TEST_OUTPUT_PATH=<where to write the transcript> \
+    ///   cargo test -p meetily --lib \
+    ///   whisper_engine::whisper_engine::tests::transcribe_env_audio_with_env_model \
+    ///   -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore]
+    async fn transcribe_env_audio_with_env_model() {
+        let model_path = std::env::var("MEETILY_TEST_MODEL_PATH")
+            .expect("set MEETILY_TEST_MODEL_PATH to a ggml file");
+        let audio_path = std::env::var("MEETILY_TEST_AUDIO_PATH")
+            .expect("set MEETILY_TEST_AUDIO_PATH to an audio file");
+        let model_name =
+            std::env::var("MEETILY_TEST_MODEL_NAME").unwrap_or_else(|_| "eval-model".to_string());
+        let ui_language = std::env::var("MEETILY_TEST_UI_LANGUAGE")
+            .unwrap_or_else(|_| language::CANTONESE.to_string());
+        let engine_language = std::env::var("MEETILY_TEST_ENGINE_LANGUAGE").ok();
+
+        let dir = tempfile::tempdir().expect("temp models dir");
+        let engine = WhisperEngine::new_with_models_dir(Some(dir.path().to_path_buf()))
+            .expect("engine construction");
+
+        if let Some(token) = engine_language.clone() {
+            custom_models::add(
+                dir.path(),
+                CustomModel {
+                    name: model_name.clone(),
+                    path: PathBuf::from(&model_path),
+                    engine_language: Some(token),
+                    supports_cantonese: true,
+                    description: "issue #13 evaluation candidate".to_string(),
+                },
+            )
+            .expect("register candidate model");
+            engine.discover_models().await.expect("discover models");
+        }
+
+        *engine.current_model.write().await = Some(model_name.clone());
+        let ctx = WhisperContext::new_with_params(&model_path, WhisperContextParameters::default())
+            .unwrap_or_else(|e| panic!("failed to load {model_path}: {e}"));
+        *engine.current_context.write().await = Some(ctx);
+
+        let decoded = crate::audio::decoder::decode_audio_file(std::path::Path::new(&audio_path))
+            .expect("decode audio file");
+        let samples = decoded.to_whisper_format();
+        eprintln!(
+            "Transcribing {} ({:.1}s @ {}Hz, {}ch) with model '{}' ui_language '{}' engine_language {:?}",
+            audio_path,
+            decoded.duration_seconds,
+            decoded.sample_rate,
+            decoded.channels,
+            model_name,
+            ui_language,
+            engine_language
+        );
+
+        let (text, confidence, _is_partial) = engine
+            .transcribe_audio_with_confidence(samples, Some(ui_language.clone()))
+            .await
+            .expect("transcription");
+
+        eprintln!("--- confidence: {confidence:.3} ---");
+        println!("{text}");
+
+        if let Ok(output_path) = std::env::var("MEETILY_TEST_OUTPUT_PATH") {
+            std::fs::write(&output_path, &text).expect("write output");
+        }
+    }
 }
