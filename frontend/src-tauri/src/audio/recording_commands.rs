@@ -69,7 +69,11 @@ pub struct TranscriptionStatus {
 /// auditable later (see docs/adr/0003).
 async fn resolve_script_setting<R: Runtime>(app: &AppHandle<R>) -> ScriptSetting {
     match app.try_state::<AppState>() {
-        Some(app_state) => crate::script::resolve_from_pool(app_state.db_manager.pool()).await,
+        Some(app_state) => {
+            crate::database::repositories::setting_store::SCRIPT
+                .read_or_default(app_state.db_manager.pool())
+                .await
+        }
         None => {
             warn!("App state not available, defaulting script setting to Traditional HK");
             ScriptSetting::default()

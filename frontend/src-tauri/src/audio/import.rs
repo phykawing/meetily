@@ -635,7 +635,9 @@ async fn run_import<R: Runtime>(
         .try_state::<AppState>()
         .ok_or_else(|| anyhow!("App state not available"))?;
 
-    let script_setting = crate::script::resolve_from_pool(app_state.db_manager.pool()).await;
+    let script_setting: ScriptSetting = crate::database::repositories::setting_store::SCRIPT
+        .read_or_default(app_state.db_manager.pool())
+        .await;
 
     // Create transcript segments, converting script once here (see docs/adr/0003)
     let segments = create_transcript_segments(&all_transcripts, script_setting);

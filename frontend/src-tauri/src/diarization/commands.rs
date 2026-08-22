@@ -1,4 +1,4 @@
-use crate::database::repositories::setting::SettingsRepository;
+use crate::database::repositories::setting_store::{self, SettingToken};
 use crate::diarization::consent::DiarizationConsent;
 use crate::diarization::manager;
 use crate::diarization::models::{total_size_bytes, DIARIZATION_MODELS};
@@ -16,13 +16,6 @@ fn base_models_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
         .app_data_dir()
         .map(|dir| dir.join("models"))
         .map_err(|e| format!("Failed to resolve app data directory: {}", e))
-}
-
-async fn resolve_consent(state: &tauri::State<'_, AppState>) -> Result<DiarizationConsent, String> {
-    let stored = SettingsRepository::get_diarization_consent(state.db_manager.pool())
-        .await
-        .map_err(|e| format!("Failed to get diarization consent: {}", e))?;
-    Ok(DiarizationConsent::from_stored(stored.as_deref()))
 }
 
 #[derive(Serialize)]
@@ -49,7 +42,11 @@ pub struct DiarizationStatusResponse {
 /// `"granted"`, or `"declined"`.
 #[command]
 pub async fn get_diarization_consent(state: tauri::State<'_, AppState>) -> Result<String, String> {
-    Ok(resolve_consent(&state).await?.as_str().to_string())
+    let consent: DiarizationConsent = setting_store::DIARIZATION_CONSENT
+        .read(state.db_manager.pool())
+        .await
+        .map_err(|e| format!("Failed to get diarization consent: {}", e))?;
+    Ok(consent.as_str().to_string())
 }
 
 /// Persists the user's answer to the diarization model-download prompt. Declining is
@@ -64,13 +61,9 @@ pub async fn set_diarization_consent(
     state: tauri::State<'_, AppState>,
     consent: String,
 ) -> Result<(), String> {
-    let resolved = match consent.as_str() {
-        "not_asked" => DiarizationConsent::NotAsked,
-        "granted" => DiarizationConsent::Granted,
-        "declined" => DiarizationConsent::Declined,
-        other => return Err(format!("Unrecognized diarization consent value: {}", other)),
-    };
-    SettingsRepository::save_diarization_consent(state.db_manager.pool(), resolved.as_str())
+    let resolved = DiarizationConsent::parse(&consent)?;
+    setting_store::DIARIZATION_CONSENT
+        .write(state.db_manager.pool(), resolved)
         .await
         .map_err(|e| format!("Failed to save diarization consent: {}", e))
 }
@@ -82,7 +75,10 @@ pub async fn diarization_model_status(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<DiarizationStatusResponse, String> {
-    let consent = resolve_consent(&state).await?;
+    let consent: DiarizationConsent = setting_store::DIARIZATION_CONSENT
+        .read(state.db_manager.pool())
+        .await
+        .map_err(|e| format!("Failed to get diarization consent: {}", e))?;
     let base_dir = base_models_dir(&app)?;
 
     let statuses = manager::model_statuses(&base_dir);
@@ -131,7 +127,11 @@ async fn download_diarization_models_inner(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    if resolve_consent(&state).await? != DiarizationConsent::Granted {
+    let consent: DiarizationConsent = setting_store::DIARIZATION_CONSENT
+        .read(state.db_manager.pool())
+        .await
+        .map_err(|e| format!("Failed to get diarization consent: {}", e))?;
+    if consent != DiarizationConsent::Granted {
         return Err("Diarization models cannot be downloaded before consent is granted".to_string());
     }
 

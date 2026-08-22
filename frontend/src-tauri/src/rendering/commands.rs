@@ -3,6 +3,7 @@ use tauri::{AppHandle, Manager, Runtime, State};
 
 use crate::database::repositories::rendering::RenderingRepository;
 use crate::database::repositories::setting::SettingsRepository;
+use crate::database::repositories::setting_store::{self, SettingToken};
 use crate::state::AppState;
 use crate::summary::llm_client::{self, LLMProvider};
 use crate::summary::processor::clean_llm_markdown_output;
@@ -29,13 +30,17 @@ pub async fn get_written_form(
 }
 
 /// Saves the Written Form preference for a meeting.
+///
+/// Rejects anything other than the two known tokens, rather than silently falling back to
+/// "colloquial" — a typo or a stale frontend build must not be able to overwrite a real
+/// answer with an unintended one.
 #[tauri::command]
 pub async fn set_written_form(
     meeting_id: String,
     written_form: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let resolved = WrittenForm::from_stored(Some(&written_form));
+    let resolved = WrittenForm::parse(&written_form)?;
     let pool = state.db_manager.pool();
 
     let updated = RenderingRepository::set_written_form(pool, &meeting_id, resolved.as_str())
@@ -53,11 +58,12 @@ pub async fn set_written_form(
 /// Defaults to "local" — the privacy-safe default — when nothing has been chosen yet.
 #[tauri::command]
 pub async fn get_rendering_provider(state: State<'_, AppState>) -> Result<String, String> {
-    let stored = SettingsRepository::get_rendering_provider(state.db_manager.pool())
+    let provider: RenderingProvider = setting_store::RENDERING_PROVIDER
+        .read(state.db_manager.pool())
         .await
         .map_err(|e| format!("Failed to read rendering provider setting: {}", e))?;
 
-    Ok(RenderingProvider::from_stored(stored.as_deref()).as_str().to_string())
+    Ok(provider.as_str().to_string())
 }
 
 /// Saves the Rendering provider setting.
@@ -70,13 +76,10 @@ pub async fn set_rendering_provider(
     state: State<'_, AppState>,
     provider: String,
 ) -> Result<(), String> {
-    let resolved = match provider.as_str() {
-        "local" => RenderingProvider::Local,
-        "summary_provider" => RenderingProvider::SummaryProvider,
-        other => return Err(format!("Unrecognized rendering provider value: {}", other)),
-    };
+    let resolved = RenderingProvider::parse(&provider)?;
 
-    SettingsRepository::save_rendering_provider(state.db_manager.pool(), resolved.as_str())
+    setting_store::RENDERING_PROVIDER
+        .write(state.db_manager.pool(), resolved)
         .await
         .map_err(|e| format!("Failed to save rendering provider setting: {}", e))
 }
@@ -231,10 +234,10 @@ pub async fn get_transcript_rendering<R: Runtime>(
         );
     }
 
-    let stored_provider = SettingsRepository::get_rendering_provider(pool)
+    let rendering_provider: RenderingProvider = setting_store::RENDERING_PROVIDER
+        .read(pool)
         .await
         .map_err(|e| format!("Failed to read rendering provider setting: {}", e))?;
-    let rendering_provider = RenderingProvider::from_stored(stored_provider.as_deref());
 
     // "Same as summary provider" only actually changes anything when that provider isn't
     // itself the local built-in model — otherwise this is the same path as `Local`.

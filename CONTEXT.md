@@ -59,3 +59,11 @@ advance.
 ### Speaker Turn
 A contiguous stretch of audio attributed to a single **Speaker**. Turn boundaries are
 found from the audio and do not necessarily line up with transcript segment boundaries.
+
+## Configuration
+
+### Setting
+A named preference persisted app-wide (one value for the whole app, not per meeting) —
+for example Script or the Rendering provider. Distinct from a **Rendering**, which is
+per-meeting and derived rather than chosen, and from the per-meeting Written Form
+preference: both of those live on the meeting itself, not in app-wide Settings.

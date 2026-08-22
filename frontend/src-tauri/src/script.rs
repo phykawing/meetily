@@ -8,10 +8,9 @@
 //
 // Uses `ferrous-opencc` — pure Rust, so no OpenCC C++ build dependency.
 
-use crate::database::repositories::setting::SettingsRepository;
+use crate::database::repositories::setting_store::SettingToken;
 use ferrous_opencc::{config::BuiltinConfig, OpenCC};
 use once_cell::sync::Lazy;
-use sqlx::SqlitePool;
 
 /// The Script setting: which Han character set (if any) transcripts are converted into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,25 +23,25 @@ pub enum ScriptSetting {
     LeaveAsRecognized,
 }
 
+impl SettingToken for ScriptSetting {
+    const TOKENS: &'static [(&'static str, Self)] = &[
+        ("traditional-hk", ScriptSetting::TraditionalHk),
+        ("simplified", ScriptSetting::Simplified),
+        ("as-recognized", ScriptSetting::LeaveAsRecognized),
+    ];
+}
+
 impl ScriptSetting {
     /// Token stored in the database and in meeting metadata.
     pub fn as_str(self) -> &'static str {
-        match self {
-            ScriptSetting::TraditionalHk => "traditional-hk",
-            ScriptSetting::Simplified => "simplified",
-            ScriptSetting::LeaveAsRecognized => "as-recognized",
-        }
+        <Self as SettingToken>::as_token(self)
     }
 
     /// Resolves a stored token into a setting. Unrecognized or absent values fall back
     /// to the default (Traditional HK) rather than erroring, since this reads a value a
     /// user picked from a fixed dropdown.
     pub fn from_stored(token: Option<&str>) -> Self {
-        match token {
-            Some("simplified") => ScriptSetting::Simplified,
-            Some("as-recognized") => ScriptSetting::LeaveAsRecognized,
-            _ => ScriptSetting::TraditionalHk,
-        }
+        <Self as SettingToken>::from_token(token)
     }
 }
 
@@ -67,20 +66,6 @@ pub fn convert(text: &str, setting: ScriptSetting) -> String {
         ScriptSetting::TraditionalHk => S2HK.convert(text),
         ScriptSetting::Simplified => T2S.convert(text),
         ScriptSetting::LeaveAsRecognized => text.to_string(),
-    }
-}
-
-/// Resolves the currently configured Script setting from the database, defaulting to
-/// Traditional (Hong Kong) when nothing has been saved yet or the read fails. Called once
-/// per recording session / batch job — not per chunk — so the conversion applied to a
-/// meeting is internally consistent even if the setting changes mid-session.
-pub async fn resolve_from_pool(pool: &SqlitePool) -> ScriptSetting {
-    match SettingsRepository::get_script_setting(pool).await {
-        Ok(stored) => ScriptSetting::from_stored(stored.as_deref()),
-        Err(e) => {
-            log::warn!("Failed to load script setting, defaulting to Traditional HK: {}", e);
-            ScriptSetting::default()
-        }
     }
 }
 

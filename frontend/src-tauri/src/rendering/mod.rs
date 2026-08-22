@@ -14,6 +14,8 @@
 
 pub mod commands;
 
+use crate::database::repositories::setting_store::SettingToken;
+
 /// Which register a meeting's transcript is displayed in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WrittenForm {
@@ -23,22 +25,23 @@ pub enum WrittenForm {
     Written,
 }
 
+impl SettingToken for WrittenForm {
+    const TOKENS: &'static [(&'static str, Self)] = &[
+        ("colloquial", WrittenForm::Colloquial),
+        ("written", WrittenForm::Written),
+    ];
+}
+
 impl WrittenForm {
     /// Token stored in the database.
     pub fn as_str(self) -> &'static str {
-        match self {
-            WrittenForm::Colloquial => "colloquial",
-            WrittenForm::Written => "written",
-        }
+        <Self as SettingToken>::as_token(self)
     }
 
     /// Resolves a stored token into a setting. Unrecognized or absent values fall back to
     /// the default (口語), matching a user picking from a fixed two-way toggle.
     pub fn from_stored(token: Option<&str>) -> Self {
-        match token {
-            Some("written") => WrittenForm::Written,
-            _ => WrittenForm::Colloquial,
-        }
+        <Self as SettingToken>::from_token(token)
     }
 }
 
@@ -61,23 +64,24 @@ pub enum RenderingProvider {
     SummaryProvider,
 }
 
+impl SettingToken for RenderingProvider {
+    const TOKENS: &'static [(&'static str, Self)] = &[
+        ("local", RenderingProvider::Local),
+        ("summary_provider", RenderingProvider::SummaryProvider),
+    ];
+}
+
 impl RenderingProvider {
     /// Token stored in the database.
     pub fn as_str(self) -> &'static str {
-        match self {
-            RenderingProvider::Local => "local",
-            RenderingProvider::SummaryProvider => "summary_provider",
-        }
+        <Self as SettingToken>::as_token(self)
     }
 
     /// Resolves a stored token into a setting. Unrecognized or absent values fall back to
     /// `Local` — the privacy-safe default, since an unrecognized value must never be
     /// treated as consent to use a remote provider.
     pub fn from_stored(token: Option<&str>) -> Self {
-        match token {
-            Some("summary_provider") => RenderingProvider::SummaryProvider,
-            _ => RenderingProvider::Local,
-        }
+        <Self as SettingToken>::from_token(token)
     }
 }
 

@@ -1,4 +1,5 @@
 use crate::database::models::{Setting, TranscriptSetting};
+use crate::database::repositories::setting_store::{self, SettingsTable, StoredSetting};
 use crate::summary::CustomOpenAIConfig;
 use sqlx::SqlitePool;
 
@@ -32,7 +33,7 @@ impl SettingsRepository {
     pub async fn get_model_config(
         pool: &SqlitePool,
     ) -> std::result::Result<Option<Setting>, sqlx::Error> {
-        let setting = sqlx::query_as::<_, Setting>("SELECT * FROM settings LIMIT 1")
+        let setting = sqlx::query_as::<_, Setting>("SELECT * FROM settings WHERE id = '1' LIMIT 1")
             .fetch_optional(pool)
             .await?;
         Ok(setting)
@@ -79,32 +80,14 @@ impl SettingsRepository {
             ));
         }
 
-        let api_key_column = match provider {
-            "openai" => "openaiApiKey",
-            "claude" => "anthropicApiKey",
-            "ollama" => "ollamaApiKey",
-            "groq" => "groqApiKey",
-            "openrouter" => "openRouterApiKey",
-            "builtin-ai" => return Ok(()), // No API key needed
-            _ => {
-                return Err(sqlx::Error::Protocol(
-                    format!("Invalid provider: {}", provider).into(),
-                ))
+        match setting_store::api_key_column(SettingsTable::Settings, provider)? {
+            Some(column) => {
+                StoredSetting::new(SettingsTable::Settings, column)
+                    .write_text(pool, Some(api_key))
+                    .await
             }
-        };
-
-        let query = format!(
-            r#"
-            INSERT INTO settings (id, provider, model, whisperModel, "{}")
-            VALUES ('1', 'openai', 'gpt-4o-2024-11-20', 'large-v3', $1)
-            ON CONFLICT(id) DO UPDATE SET
-                "{}" = $1
-            "#,
-            api_key_column, api_key_column
-        );
-        sqlx::query(&query).bind(api_key).execute(pool).await?;
-
-        Ok(())
+            None => Ok(()), // No API key needed (builtin-ai)
+        }
     }
 
     pub async fn get_api_key(
@@ -117,37 +100,21 @@ impl SettingsRepository {
             return Ok(config.and_then(|c| c.api_key));
         }
 
-        let api_key_column = match provider {
-            "openai" => "openaiApiKey",
-            "ollama" => "ollamaApiKey",
-            "groq" => "groqApiKey",
-            "claude" => "anthropicApiKey",
-            "openrouter" => "openRouterApiKey",
-            "builtin-ai" => return Ok(None), // No API key needed
-            _ => {
-                return Err(sqlx::Error::Protocol(
-                    format!("Invalid provider: {}", provider).into(),
-                ))
-            }
-        };
-
-        let query = format!(
-            "SELECT {} FROM settings WHERE id = '1' LIMIT 1",
-            api_key_column
-        );
-        let api_key = sqlx::query_scalar(&query).fetch_optional(pool).await?;
-        Ok(api_key)
+        match setting_store::api_key_column(SettingsTable::Settings, provider)? {
+            Some(column) => StoredSetting::new(SettingsTable::Settings, column).read_text(pool).await,
+            None => Ok(None), // No API key needed (builtin-ai)
+        }
     }
 
     pub async fn get_transcript_config(
         pool: &SqlitePool,
     ) -> std::result::Result<Option<TranscriptSetting>, sqlx::Error> {
-        let setting =
-            sqlx::query_as::<_, TranscriptSetting>("SELECT * FROM transcript_settings LIMIT 1")
-                .fetch_optional(pool)
-                .await?;
+        let setting = sqlx::query_as::<_, TranscriptSetting>(
+            "SELECT * FROM transcript_settings WHERE id = '1' LIMIT 1",
+        )
+        .fetch_optional(pool)
+        .await?;
         Ok(setting)
-
     }
 
     pub async fn save_transcript_config(
@@ -172,239 +139,43 @@ impl SettingsRepository {
         Ok(())
     }
 
-    /// Gets the persisted meeting vocabulary (names, jargon, product terms) folded into the
-    /// Whisper initial prompt. `None` when nothing has been saved yet.
-    pub async fn get_meeting_vocabulary(
-        pool: &SqlitePool,
-    ) -> std::result::Result<Option<String>, sqlx::Error> {
-        let vocabulary: Option<Option<String>> =
-            sqlx::query_scalar("SELECT meetingVocabulary FROM transcript_settings WHERE id = '1' LIMIT 1")
-                .fetch_optional(pool)
-                .await?;
-        Ok(vocabulary.flatten())
-    }
-
-    /// Saves the meeting vocabulary. Whitespace-only input is normalized to `NULL` so an
-    /// empty vocabulary produces no prompt at all.
-    ///
-    /// Updates the existing row when one is present, so this never overwrites a provider
-    /// the user already chose. Only falls back to inserting a fresh row (with the app's
-    /// documented default provider) when no transcript settings exist at all yet.
-    pub async fn save_meeting_vocabulary(
-        pool: &SqlitePool,
-        vocabulary: Option<&str>,
-    ) -> std::result::Result<(), sqlx::Error> {
-        let cleaned = vocabulary.map(str::trim).filter(|v| !v.is_empty());
-
-        let result = sqlx::query("UPDATE transcript_settings SET meetingVocabulary = $1 WHERE id = '1'")
-            .bind(cleaned)
-            .execute(pool)
-            .await?;
-
-        if result.rows_affected() == 0 {
-            sqlx::query(
-                r#"
-                INSERT INTO transcript_settings (id, provider, model, meetingVocabulary)
-                VALUES ('1', 'parakeet', $1, $2)
-                "#,
-            )
-            .bind(crate::config::DEFAULT_PARAKEET_MODEL)
-            .bind(cleaned)
-            .execute(pool)
-            .await?;
-        }
-
-        Ok(())
-    }
-
-    /// Gets the persisted Script setting token (see `crate::script::ScriptSetting`), for
-    /// display in Settings. `None` when nothing has been saved yet — callers resolve that
-    /// to the default via `ScriptSetting::from_stored`.
-    pub async fn get_script_setting(
-        pool: &SqlitePool,
-    ) -> std::result::Result<Option<String>, sqlx::Error> {
-        let setting: Option<Option<String>> =
-            sqlx::query_scalar("SELECT scriptSetting FROM transcript_settings WHERE id = '1' LIMIT 1")
-                .fetch_optional(pool)
-                .await?;
-        Ok(setting.flatten())
-    }
-
-    /// Saves the Script setting token.
-    ///
-    /// Updates the existing row when one is present, so this never overwrites a provider
-    /// the user already chose. Only falls back to inserting a fresh row (with the app's
-    /// documented default provider) when no transcript settings exist at all yet.
-    pub async fn save_script_setting(
-        pool: &SqlitePool,
-        script_setting: &str,
-    ) -> std::result::Result<(), sqlx::Error> {
-        let result = sqlx::query("UPDATE transcript_settings SET scriptSetting = $1 WHERE id = '1'")
-            .bind(script_setting)
-            .execute(pool)
-            .await?;
-
-        if result.rows_affected() == 0 {
-            sqlx::query(
-                r#"
-                INSERT INTO transcript_settings (id, provider, model, scriptSetting)
-                VALUES ('1', 'parakeet', $1, $2)
-                "#,
-            )
-            .bind(crate::config::DEFAULT_PARAKEET_MODEL)
-            .bind(script_setting)
-            .execute(pool)
-            .await?;
-        }
-
-        Ok(())
-    }
-
-    /// Gets the persisted diarization model-download consent token (see
-    /// `crate::diarization::consent::DiarizationConsent`). `None` when the user has not
-    /// been asked yet.
-    pub async fn get_diarization_consent(
-        pool: &SqlitePool,
-    ) -> std::result::Result<Option<String>, sqlx::Error> {
-        let consent: Option<Option<String>> =
-            sqlx::query_scalar("SELECT diarizationConsent FROM settings WHERE id = '1' LIMIT 1")
-                .fetch_optional(pool)
-                .await?;
-        Ok(consent.flatten())
-    }
-
-    /// Saves the diarization model-download consent token.
-    ///
-    /// Updates the existing row when one is present. Only falls back to inserting a fresh
-    /// row (with the app's documented default provider) when no settings exist at all yet.
-    pub async fn save_diarization_consent(
-        pool: &SqlitePool,
-        consent: &str,
-    ) -> std::result::Result<(), sqlx::Error> {
-        let result = sqlx::query("UPDATE settings SET diarizationConsent = $1 WHERE id = '1'")
-            .bind(consent)
-            .execute(pool)
-            .await?;
-
-        if result.rows_affected() == 0 {
-            sqlx::query(
-                r#"
-                INSERT INTO settings (id, provider, model, whisperModel, diarizationConsent)
-                VALUES ('1', 'openai', 'gpt-4o-2024-11-20', 'large-v3', $1)
-                "#,
-            )
-            .bind(consent)
-            .execute(pool)
-            .await?;
-        }
-
-        Ok(())
-    }
-
-    /// Gets the persisted Rendering provider token (see
-    /// `crate::rendering::RenderingProvider`). `None` when the user has not chosen yet.
-    pub async fn get_rendering_provider(
-        pool: &SqlitePool,
-    ) -> std::result::Result<Option<String>, sqlx::Error> {
-        let provider: Option<Option<String>> =
-            sqlx::query_scalar("SELECT renderingProvider FROM settings WHERE id = '1' LIMIT 1")
-                .fetch_optional(pool)
-                .await?;
-        Ok(provider.flatten())
-    }
-
-    /// Saves the Rendering provider token.
-    ///
-    /// Updates the existing row when one is present. Only falls back to inserting a fresh
-    /// row (with the app's documented default provider) when no settings exist at all yet.
-    pub async fn save_rendering_provider(
-        pool: &SqlitePool,
-        rendering_provider: &str,
-    ) -> std::result::Result<(), sqlx::Error> {
-        let result = sqlx::query("UPDATE settings SET renderingProvider = $1 WHERE id = '1'")
-            .bind(rendering_provider)
-            .execute(pool)
-            .await?;
-
-        if result.rows_affected() == 0 {
-            sqlx::query(
-                r#"
-                INSERT INTO settings (id, provider, model, whisperModel, renderingProvider)
-                VALUES ('1', 'openai', 'gpt-4o-2024-11-20', 'large-v3', $1)
-                "#,
-            )
-            .bind(rendering_provider)
-            .execute(pool)
-            .await?;
-        }
-
-        Ok(())
-    }
-
     pub async fn save_transcript_api_key(
         pool: &SqlitePool,
         provider: &str,
         api_key: &str,
     ) -> std::result::Result<(), sqlx::Error> {
-        let api_key_column = match provider {
-            "localWhisper" => "whisperApiKey",
-            "parakeet" => return Ok(()), // Parakeet doesn't need an API key, return early
-            "deepgram" => "deepgramApiKey",
-            "elevenLabs" => "elevenLabsApiKey",
-            "groq" => "groqApiKey",
-            "openai" => "openaiApiKey",
-            _ => {
-                return Err(sqlx::Error::Protocol(
-                    format!("Invalid provider: {}", provider).into(),
-                ))
+        match setting_store::api_key_column(SettingsTable::TranscriptSettings, provider)? {
+            Some(column) => {
+                StoredSetting::new(SettingsTable::TranscriptSettings, column)
+                    .write_text(pool, Some(api_key))
+                    .await
             }
-        };
-
-        let query = format!(
-            r#"
-            INSERT INTO transcript_settings (id, provider, model, "{}")
-            VALUES ('1', 'parakeet', '{}', $1)
-            ON CONFLICT(id) DO UPDATE SET
-                "{}" = $1
-            "#,
-            api_key_column, crate::config::DEFAULT_PARAKEET_MODEL, api_key_column
-        );
-        sqlx::query(&query).bind(api_key).execute(pool).await?;
-
-        Ok(())
+            None => Ok(()), // No API key needed (parakeet)
+        }
     }
 
     pub async fn get_transcript_api_key(
         pool: &SqlitePool,
         provider: &str,
     ) -> std::result::Result<Option<String>, sqlx::Error> {
-        let api_key_column = match provider {
-            "localWhisper" => "whisperApiKey",
-            "parakeet" => return Ok(None), // Parakeet doesn't need an API key
-            "deepgram" => "deepgramApiKey",
-            "elevenLabs" => "elevenLabsApiKey",
-            "groq" => "groqApiKey",
-            "openai" => "openaiApiKey",
-            _ => {
-                return Err(sqlx::Error::Protocol(
-                    format!("Invalid provider: {}", provider).into(),
-                ))
+        match setting_store::api_key_column(SettingsTable::TranscriptSettings, provider)? {
+            Some(column) => {
+                StoredSetting::new(SettingsTable::TranscriptSettings, column)
+                    .read_text(pool)
+                    .await
             }
-        };
-
-        let query = format!(
-            "SELECT {} FROM transcript_settings WHERE id = '1' LIMIT 1",
-            api_key_column
-        );
-        let api_key = sqlx::query_scalar(&query).fetch_optional(pool).await?;
-        Ok(api_key)
+            None => Ok(None), // No API key needed (parakeet)
+        }
     }
 
+    /// Currently unreachable from the frontend: its only caller, `api_delete_api_key`, is
+    /// not registered in the `tauri::generate_handler!` list in `lib.rs`. Kept working and
+    /// tested rather than deleted, since wiring it up is a one-line change elsewhere.
     pub async fn delete_api_key(
         pool: &SqlitePool,
         provider: &str,
     ) -> std::result::Result<(), sqlx::Error> {
-        // Custom OpenAI uses JSON config - clear the entire config
+        // Custom OpenAI uses JSON config - clear the entire config, not just one column.
         if provider == "custom-openai" {
             sqlx::query("UPDATE settings SET customOpenAIConfig = NULL WHERE id = '1'")
                 .execute(pool)
@@ -412,27 +183,10 @@ impl SettingsRepository {
             return Ok(());
         }
 
-        let api_key_column = match provider {
-            "openai" => "openaiApiKey",
-            "ollama" => "ollamaApiKey",
-            "groq" => "groqApiKey",
-            "claude" => "anthropicApiKey",
-            "openrouter" => "openRouterApiKey",
-            "builtin-ai" => return Ok(()), // No API key needed
-            _ => {
-                return Err(sqlx::Error::Protocol(
-                    format!("Invalid provider: {}", provider).into(),
-                ))
-            }
-        };
-
-        let query = format!(
-            "UPDATE settings SET {} = NULL WHERE id = '1'",
-            api_key_column
-        );
-        sqlx::query(&query).execute(pool).await?;
-
-        Ok(())
+        match setting_store::api_key_column(SettingsTable::Settings, provider)? {
+            Some(column) => StoredSetting::new(SettingsTable::Settings, column).clear(pool).await,
+            None => Ok(()), // No API key needed (builtin-ai)
+        }
     }
 
     // ===== CUSTOM OPENAI CONFIG METHODS =====
@@ -526,150 +280,164 @@ mod tests {
         pool
     }
 
+    // The four scalar-token settings (meeting vocabulary, Script, diarization consent,
+    // Rendering provider) moved to `setting_store` — see its test module for their
+    // round-trip and no-clobber coverage. Tests here cover what stays in this file: whole
+    // rows, and the API-key functions, which had zero coverage before this refactor.
+
     #[tokio::test]
-    async fn meeting_vocabulary_round_trips() {
+    async fn summary_api_key_round_trips_per_provider() {
+        let pool = migrated_pool().await;
+        for provider in ["openai", "claude", "ollama", "groq", "openrouter"] {
+            assert_eq!(SettingsRepository::get_api_key(&pool, provider).await.unwrap(), None);
+            SettingsRepository::save_api_key(&pool, provider, "secret-key").await.unwrap();
+            assert_eq!(
+                SettingsRepository::get_api_key(&pool, provider).await.unwrap().as_deref(),
+                Some("secret-key")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn transcript_api_key_round_trips_per_provider() {
+        let pool = migrated_pool().await;
+        for provider in ["localWhisper", "deepgram", "elevenLabs", "groq", "openai"] {
+            assert_eq!(
+                SettingsRepository::get_transcript_api_key(&pool, provider).await.unwrap(),
+                None
+            );
+            SettingsRepository::save_transcript_api_key(&pool, provider, "secret-key")
+                .await
+                .unwrap();
+            assert_eq!(
+                SettingsRepository::get_transcript_api_key(&pool, provider)
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some("secret-key")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn builtin_ai_and_parakeet_need_no_key() {
         let pool = migrated_pool().await;
 
-        assert_eq!(SettingsRepository::get_meeting_vocabulary(&pool).await.unwrap(), None);
+        assert_eq!(SettingsRepository::get_api_key(&pool, "builtin-ai").await.unwrap(), None);
+        SettingsRepository::save_api_key(&pool, "builtin-ai", "ignored").await.unwrap();
+        assert_eq!(SettingsRepository::get_api_key(&pool, "builtin-ai").await.unwrap(), None);
 
-        SettingsRepository::save_meeting_vocabulary(&pool, Some("陳大文, Zackriya"))
+        assert_eq!(
+            SettingsRepository::get_transcript_api_key(&pool, "parakeet").await.unwrap(),
+            None
+        );
+        SettingsRepository::save_transcript_api_key(&pool, "parakeet", "ignored").await.unwrap();
+        assert_eq!(
+            SettingsRepository::get_transcript_api_key(&pool, "parakeet").await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_provider_is_rejected_on_read_save_and_delete() {
+        let pool = migrated_pool().await;
+        assert!(SettingsRepository::get_api_key(&pool, "bogus").await.is_err());
+        assert!(SettingsRepository::save_api_key(&pool, "bogus", "key").await.is_err());
+        assert!(SettingsRepository::delete_api_key(&pool, "bogus").await.is_err());
+        assert!(SettingsRepository::get_transcript_api_key(&pool, "bogus").await.is_err());
+        assert!(SettingsRepository::save_transcript_api_key(&pool, "bogus", "key").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn saving_an_api_key_never_overwrites_an_already_chosen_provider() {
+        let pool = migrated_pool().await;
+
+        SettingsRepository::save_model_config(&pool, "claude", "claude-3", "large-v3", None)
             .await
             .unwrap();
-        assert_eq!(
-            SettingsRepository::get_meeting_vocabulary(&pool).await.unwrap().as_deref(),
-            Some("陳大文, Zackriya")
-        );
+        SettingsRepository::save_api_key(&pool, "openai", "secret-key").await.unwrap();
+        let config = SettingsRepository::get_model_config(&pool).await.unwrap().unwrap();
+        assert_eq!(config.provider, "claude");
+        assert_eq!(config.model, "claude-3");
 
-        // Overwriting must not disturb an unrelated column already set on the row.
         SettingsRepository::save_transcript_config(&pool, "localWhisper", "large-v3")
             .await
             .unwrap();
-        assert_eq!(
-            SettingsRepository::get_meeting_vocabulary(&pool).await.unwrap().as_deref(),
-            Some("陳大文, Zackriya")
-        );
-    }
-
-    #[tokio::test]
-    async fn whitespace_only_vocabulary_is_stored_as_none() {
-        let pool = migrated_pool().await;
-
-        SettingsRepository::save_meeting_vocabulary(&pool, Some("   \n\t  "))
-            .await
-            .unwrap();
-        assert_eq!(SettingsRepository::get_meeting_vocabulary(&pool).await.unwrap(), None);
-    }
-
-    #[tokio::test]
-    async fn clearing_vocabulary_removes_it() {
-        let pool = migrated_pool().await;
-
-        SettingsRepository::save_meeting_vocabulary(&pool, Some("Zackriya")).await.unwrap();
-        SettingsRepository::save_meeting_vocabulary(&pool, None).await.unwrap();
-        assert_eq!(SettingsRepository::get_meeting_vocabulary(&pool).await.unwrap(), None);
-    }
-
-    #[tokio::test]
-    async fn saving_vocabulary_never_overwrites_an_already_chosen_provider() {
-        let pool = migrated_pool().await;
-
-        SettingsRepository::save_transcript_config(&pool, "localWhisper", "large-v3")
-            .await
-            .unwrap();
-        SettingsRepository::save_meeting_vocabulary(&pool, Some("Zackriya"))
-            .await
-            .unwrap();
-
+        SettingsRepository::save_transcript_api_key(&pool, "groq", "secret-key").await.unwrap();
         let config = SettingsRepository::get_transcript_config(&pool).await.unwrap().unwrap();
         assert_eq!(config.provider, "localWhisper");
         assert_eq!(config.model, "large-v3");
     }
 
     #[tokio::test]
-    async fn script_setting_round_trips() {
+    async fn delete_api_key_nulls_exactly_one_column() {
         let pool = migrated_pool().await;
+        SettingsRepository::save_api_key(&pool, "openai", "openai-key").await.unwrap();
+        SettingsRepository::save_api_key(&pool, "claude", "claude-key").await.unwrap();
 
-        assert_eq!(SettingsRepository::get_script_setting(&pool).await.unwrap(), None);
+        SettingsRepository::delete_api_key(&pool, "openai").await.unwrap();
 
-        SettingsRepository::save_script_setting(&pool, "simplified")
-            .await
-            .unwrap();
+        assert_eq!(SettingsRepository::get_api_key(&pool, "openai").await.unwrap(), None);
         assert_eq!(
-            SettingsRepository::get_script_setting(&pool).await.unwrap().as_deref(),
-            Some("simplified")
-        );
-
-        // Overwriting must not disturb an unrelated column already set on the row.
-        SettingsRepository::save_transcript_config(&pool, "localWhisper", "large-v3")
-            .await
-            .unwrap();
-        assert_eq!(
-            SettingsRepository::get_script_setting(&pool).await.unwrap().as_deref(),
-            Some("simplified")
+            SettingsRepository::get_api_key(&pool, "claude").await.unwrap().as_deref(),
+            Some("claude-key")
         );
     }
 
     #[tokio::test]
-    async fn diarization_consent_round_trips() {
+    async fn deleting_an_api_key_on_an_empty_table_is_a_no_op() {
+        let pool = migrated_pool().await;
+        // No settings row exists yet — deleting must not create one.
+        SettingsRepository::delete_api_key(&pool, "openai").await.unwrap();
+        assert!(SettingsRepository::get_model_config(&pool).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn custom_openai_api_key_delegates_to_the_json_config() {
         let pool = migrated_pool().await;
 
-        assert_eq!(SettingsRepository::get_diarization_consent(&pool).await.unwrap(), None);
-
-        SettingsRepository::save_diarization_consent(&pool, "granted")
+        assert_eq!(SettingsRepository::get_api_key(&pool, "custom-openai").await.unwrap(), None);
+        assert!(SettingsRepository::save_api_key(&pool, "custom-openai", "ignored")
             .await
-            .unwrap();
+            .is_err());
+
+        let config = CustomOpenAIConfig {
+            endpoint: "https://example.com".to_string(),
+            api_key: Some("custom-key".to_string()),
+            model: "custom-model".to_string(),
+            max_tokens: None,
+            temperature: None,
+            top_p: None,
+        };
+        SettingsRepository::save_custom_openai_config(&pool, &config).await.unwrap();
         assert_eq!(
-            SettingsRepository::get_diarization_consent(&pool).await.unwrap().as_deref(),
-            Some("granted")
+            SettingsRepository::get_api_key(&pool, "custom-openai").await.unwrap().as_deref(),
+            Some("custom-key")
         );
 
-        // Overwriting must not disturb an unrelated column already set on the same row.
+        // Deleting a custom-openai key clears the whole config, not just the key, unlike
+        // every other provider's delete.
+        SettingsRepository::delete_api_key(&pool, "custom-openai").await.unwrap();
+        assert!(SettingsRepository::get_custom_openai_config(&pool).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn model_config_and_transcript_config_round_trip() {
+        let pool = migrated_pool().await;
+        assert!(SettingsRepository::get_model_config(&pool).await.unwrap().is_none());
+        assert!(SettingsRepository::get_transcript_config(&pool).await.unwrap().is_none());
+
         SettingsRepository::save_model_config(&pool, "openai", "gpt-4o", "large-v3", None)
             .await
             .unwrap();
-        assert_eq!(
-            SettingsRepository::get_diarization_consent(&pool).await.unwrap().as_deref(),
-            Some("granted")
-        );
-    }
+        let config = SettingsRepository::get_model_config(&pool).await.unwrap().unwrap();
+        assert_eq!(config.provider, "openai");
+        assert_eq!(config.model, "gpt-4o");
 
-    #[tokio::test]
-    async fn rendering_provider_round_trips() {
-        let pool = migrated_pool().await;
-
-        assert_eq!(SettingsRepository::get_rendering_provider(&pool).await.unwrap(), None);
-
-        SettingsRepository::save_rendering_provider(&pool, "summary_provider")
+        SettingsRepository::save_transcript_config(&pool, "parakeet", "parakeet-tdt-0.6b-v3-int8")
             .await
             .unwrap();
-        assert_eq!(
-            SettingsRepository::get_rendering_provider(&pool).await.unwrap().as_deref(),
-            Some("summary_provider")
-        );
-
-        // Overwriting must not disturb an unrelated column already set on the same row.
-        SettingsRepository::save_model_config(&pool, "openai", "gpt-4o", "large-v3", None)
-            .await
-            .unwrap();
-        assert_eq!(
-            SettingsRepository::get_rendering_provider(&pool).await.unwrap().as_deref(),
-            Some("summary_provider")
-        );
-    }
-
-    #[tokio::test]
-    async fn saving_script_setting_never_overwrites_an_already_chosen_provider() {
-        let pool = migrated_pool().await;
-
-        SettingsRepository::save_transcript_config(&pool, "localWhisper", "large-v3")
-            .await
-            .unwrap();
-        SettingsRepository::save_script_setting(&pool, "as-recognized")
-            .await
-            .unwrap();
-
         let config = SettingsRepository::get_transcript_config(&pool).await.unwrap().unwrap();
-        assert_eq!(config.provider, "localWhisper");
-        assert_eq!(config.model, "large-v3");
+        assert_eq!(config.provider, "parakeet");
     }
 }

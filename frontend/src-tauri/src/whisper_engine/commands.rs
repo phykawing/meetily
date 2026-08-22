@@ -1,4 +1,4 @@
-use crate::database::repositories::setting::SettingsRepository;
+use crate::database::repositories::setting_store::{self, SettingToken};
 use crate::state::AppState;
 use crate::whisper_engine::custom_models::{self, CustomModel};
 use crate::whisper_engine::language;
@@ -675,7 +675,7 @@ pub async fn open_models_folder() -> Result<(), String> {
 pub async fn refresh_vocabulary_from_db<R: Runtime>(app: &AppHandle<R>, engine: &WhisperEngine) {
     let app_state = app.state::<AppState>();
     let pool = app_state.db_manager.pool();
-    match SettingsRepository::get_meeting_vocabulary(pool).await {
+    match setting_store::MEETING_VOCABULARY.read_text(pool).await {
         Ok(vocabulary) => engine.set_vocabulary(vocabulary).await,
         Err(e) => log::warn!("Failed to load meeting vocabulary: {}", e),
     }
@@ -684,7 +684,8 @@ pub async fn refresh_vocabulary_from_db<R: Runtime>(app: &AppHandle<R>, engine: 
 /// Gets the persisted meeting vocabulary, for display in Settings.
 #[command]
 pub async fn get_meeting_vocabulary(state: tauri::State<'_, AppState>) -> Result<Option<String>, String> {
-    SettingsRepository::get_meeting_vocabulary(state.db_manager.pool())
+    setting_store::MEETING_VOCABULARY
+        .read_text(state.db_manager.pool())
         .await
         .map_err(|e| format!("Failed to get meeting vocabulary: {}", e))
 }
@@ -696,7 +697,7 @@ pub async fn save_meeting_vocabulary(
     state: tauri::State<'_, AppState>,
     vocabulary: Option<String>,
 ) -> Result<(), String> {
-    SettingsRepository::save_meeting_vocabulary(state.db_manager.pool(), vocabulary.as_deref())
+    setting_store::write_meeting_vocabulary(state.db_manager.pool(), vocabulary.as_deref())
         .await
         .map_err(|e| format!("Failed to save meeting vocabulary: {}", e))?;
 
@@ -715,22 +716,27 @@ pub async fn save_meeting_vocabulary(
 /// (Hong Kong) when nothing has been saved yet.
 #[command]
 pub async fn get_script_setting(state: tauri::State<'_, AppState>) -> Result<String, String> {
-    let stored = SettingsRepository::get_script_setting(state.db_manager.pool())
+    let script: crate::script::ScriptSetting = setting_store::SCRIPT
+        .read(state.db_manager.pool())
         .await
         .map_err(|e| format!("Failed to get script setting: {}", e))?;
-    Ok(crate::script::ScriptSetting::from_stored(stored.as_deref()).as_str().to_string())
+    Ok(script.as_str().to_string())
 }
 
 /// Persists the Script setting. Applied the next time a transcript is stored (recording,
 /// import, or retranscription) — not retroactively to existing meetings.
+///
+/// Rejects anything other than the three known tokens, rather than silently coercing to
+/// the default — a typo or a stale frontend build must not be able to overwrite a real
+/// answer with an unintended one.
 #[command]
 pub async fn save_script_setting(
     state: tauri::State<'_, AppState>,
     script_setting: String,
 ) -> Result<(), String> {
-    // Normalize through the enum so an unrecognized value never reaches the database.
-    let resolved = crate::script::ScriptSetting::from_stored(Some(&script_setting));
-    SettingsRepository::save_script_setting(state.db_manager.pool(), resolved.as_str())
+    let resolved = crate::script::ScriptSetting::parse(&script_setting)?;
+    setting_store::SCRIPT
+        .write(state.db_manager.pool(), resolved)
         .await
         .map_err(|e| format!("Failed to save script setting: {}", e))
 }

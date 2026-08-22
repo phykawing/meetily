@@ -4,6 +4,8 @@
 // automatically. The user must explicitly answer a prompt stating the approximate
 // download size before anything is fetched — see docs/adr/0005 and ADR-0001.
 
+use crate::database::repositories::setting_store::SettingToken;
+
 /// Whether the user has answered the diarization model-download prompt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiarizationConsent {
@@ -17,25 +19,25 @@ pub enum DiarizationConsent {
     Declined,
 }
 
+impl SettingToken for DiarizationConsent {
+    const TOKENS: &'static [(&'static str, Self)] = &[
+        ("not_asked", DiarizationConsent::NotAsked),
+        ("granted", DiarizationConsent::Granted),
+        ("declined", DiarizationConsent::Declined),
+    ];
+}
+
 impl DiarizationConsent {
     /// Token stored in the database.
     pub fn as_str(self) -> &'static str {
-        match self {
-            DiarizationConsent::NotAsked => "not_asked",
-            DiarizationConsent::Granted => "granted",
-            DiarizationConsent::Declined => "declined",
-        }
+        <Self as SettingToken>::as_token(self)
     }
 
     /// Resolves a stored token into a consent state. Unrecognized or absent values fall
     /// back to `NotAsked` — the safe default, since an unrecognized value must never be
     /// treated as consent to download.
     pub fn from_stored(token: Option<&str>) -> Self {
-        match token {
-            Some("granted") => DiarizationConsent::Granted,
-            Some("declined") => DiarizationConsent::Declined,
-            _ => DiarizationConsent::NotAsked,
-        }
+        <Self as SettingToken>::from_token(token)
     }
 }
 
