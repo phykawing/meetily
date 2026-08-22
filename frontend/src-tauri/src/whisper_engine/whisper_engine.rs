@@ -1355,14 +1355,19 @@ mod tests {
     /// Runs one transcription through the real engine path (`resolve_decoding` +
     /// `transcribe_audio_with_confidence`) for issue #13's side-by-side Cantonese
     /// evaluation. Not a correctness assertion — it prints the transcript so candidates can
-    /// be compared by hand. A model name with no `MEETILY_TEST_ENGINE_LANGUAGE` exercises the
-    /// builtin large-v3 zh+prompt path; setting it registers the model as a custom candidate
-    /// declaring that token first, exactly like `custom_models::add` (issue #12).
+    /// be compared by hand. Omitting `MEETILY_TEST_ENGINE_LANGUAGE` (and
+    /// `MEETILY_TEST_MODEL_NAME`, which then defaults to `large-v3-turbo`) exercises the
+    /// builtin large-v3 zh+prompt path; setting both registers the model as a custom
+    /// candidate declaring that token first, exactly like `custom_models::add` (issue #12).
+    /// The context is loaded with the same GPU/flash-attn acceleration params
+    /// `WhisperEngine::load_model` would pick for this machine's hardware, not bare
+    /// defaults, so a run on the CUDA target hardware stays faithful to what `load_model`
+    /// would actually do there.
     ///
     /// ```text
     /// MEETILY_TEST_MODEL_PATH=<ggml file> \
     /// MEETILY_TEST_AUDIO_PATH=<audio file> \
-    /// MEETILY_TEST_MODEL_NAME=<label> \
+    /// MEETILY_TEST_MODEL_NAME=<label, default "large-v3-turbo"> \
     /// MEETILY_TEST_ENGINE_LANGUAGE=<token, omit for the builtin path> \
     /// MEETILY_TEST_OUTPUT_PATH=<where to write the transcript> \
     ///   cargo test -p meetily --lib \
@@ -1376,15 +1381,15 @@ mod tests {
             .expect("set MEETILY_TEST_MODEL_PATH to a ggml file");
         let audio_path = std::env::var("MEETILY_TEST_AUDIO_PATH")
             .expect("set MEETILY_TEST_AUDIO_PATH to an audio file");
-        let model_name =
-            std::env::var("MEETILY_TEST_MODEL_NAME").unwrap_or_else(|_| "eval-model".to_string());
+        // Defaults to a name the builtin capability rule accepts, so leaving both this and
+        // MEETILY_TEST_ENGINE_LANGUAGE unset exercises the builtin path as documented above.
+        let model_name = std::env::var("MEETILY_TEST_MODEL_NAME")
+            .unwrap_or_else(|_| "large-v3-turbo".to_string());
         let ui_language = std::env::var("MEETILY_TEST_UI_LANGUAGE")
             .unwrap_or_else(|_| language::CANTONESE.to_string());
         let engine_language = std::env::var("MEETILY_TEST_ENGINE_LANGUAGE").ok();
 
-        let dir = tempfile::tempdir().expect("temp models dir");
-        let engine = WhisperEngine::new_with_models_dir(Some(dir.path().to_path_buf()))
-            .expect("engine construction");
+        let (engine, dir) = engine_without_model();
 
         if let Some(token) = engine_language.clone() {
             custom_models::add(
@@ -1402,7 +1407,22 @@ mod tests {
         }
 
         *engine.current_model.write().await = Some(model_name.clone());
-        let ctx = WhisperContext::new_with_params(&model_path, WhisperContextParameters::default())
+
+        // Mirrors WhisperEngine::load_model's acceleration setup so this harness stays
+        // faithful to production loading, not whisper-rs's bare defaults.
+        let hardware_profile = crate::audio::HardwareProfile::detect();
+        let acceleration = whisper_context_acceleration_for(
+            WhisperCompiledBackend::current(),
+            hardware_profile.gpu_type,
+            hardware_profile.performance_tier,
+        );
+        let context_param = WhisperContextParameters {
+            use_gpu: acceleration.use_gpu,
+            gpu_device: acceleration.gpu_device,
+            flash_attn: acceleration.flash_attn,
+            ..Default::default()
+        };
+        let ctx = WhisperContext::new_with_params(&model_path, context_param)
             .unwrap_or_else(|e| panic!("failed to load {model_path}: {e}"));
         *engine.current_context.write().await = Some(ctx);
 

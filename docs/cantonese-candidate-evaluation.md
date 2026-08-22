@@ -45,7 +45,7 @@ issue), parameterised by env vars so the same harness runs every arm:
 ```powershell
 $env:MEETILY_TEST_MODEL_PATH = "<ggml file>"
 $env:MEETILY_TEST_AUDIO_PATH = "<audio file>"
-$env:MEETILY_TEST_MODEL_NAME = "<label>"
+$env:MEETILY_TEST_MODEL_NAME = "<label, default 'large-v3-turbo'>"
 $env:MEETILY_TEST_ENGINE_LANGUAGE = "<token>"   # omit to exercise the builtin large-v3 path
 $env:MEETILY_TEST_UI_LANGUAGE = "yue"
 $env:MEETILY_TEST_OUTPUT_PATH = "<where to write the transcript>"
@@ -65,6 +65,16 @@ in (a plain CPU CMake build, per `scripts/convert-whisper-to-ggml.md`), so wall-
 below is **not representative of the CUDA build** the target hardware (RTX 2070 Super) would
 actually run. Timing is recorded for completeness but is not part of the adoption decision;
 content quality is.
+
+**Scope note on "exactly what the app would produce"**: this covers the transcription
+engine itself — language resolution, prompt, decode params. It does **not** cover ingest-time
+post-processing that happens after transcription, in particular Simplified→Traditional
+script conversion (ADR-0003), which is applied to every Chinese transcript regardless of
+what the model emitted and is not exercised by this harness or by
+`transcribe_audio_with_confidence` itself. The **Script** row below reports each model's
+*raw* output only; in the shipped app all three arms would read Traditional after ingest
+regardless of this row, so Script is not itself a differentiator between candidates — it's
+included for interest, not as a decision input.
 
 ## Candidates
 
@@ -153,7 +163,7 @@ enough to warrant it.
 | | Baseline (`large-v3-turbo`, `zh`) | Candidate A (fp16, `yue`) | Candidate B (q5_0, `yue`) |
 |---|---|---|---|
 | Content coverage | 6561 chars (100%) | 2936 chars (45%) | 348 chars (5%) |
-| Script | Traditional ✅ | Traditional ✅ | Traditional ✅ |
+| Script (raw model output; ingest normalizes all arms to Traditional regardless — not a differentiator) | Traditional ✅ | Traditional ✅ | Traditional ✅ |
 | Register | 書面語 ❌ (ADR-0002 wants 口語) | 口語 ✅ | too little output to judge |
 | Code-switched English preserved | Mostly ✅ (1 mishearing) | Mostly ✅ (1 mishearing) | too little output to judge |
 | Decode artifacts | None | 2× `�` malformed tokens | Hallucinated opening line |
@@ -213,25 +223,3 @@ user.
   and can still register `cantonese-yue-en-turbo` (fp16) themselves through the model
   manager (#12) if they want to experiment — that path was built and works — with the
   caveat documented here that it drops significant content on demanding audio.
-
-## Comparison
-
-_Pending both candidate runs — filled in once all three transcripts exist._
-
-Axes to judge on (from the evaluation plan; these are all independently checkable without
-knowing exactly what was said, since nobody transcribing this by ear was available):
-
-- Code-switched English preserved verbatim vs. translated/mangled.
-- Traditional script (ADR-0003) and 口語 colloquial register (ADR-0002) vs. 書面語.
-- Repetition-loop / hallucination artifacts.
-- Places where candidates disagree with the baseline or each other on the same passage.
-
-**Residual**: none of this checks transcription *accuracy* against what was actually said —
-that needs a human who was in the room, or at minimum someone reviewing the audio directly.
-This evaluation can rule candidates in or out on the observable axes above and give a
-verdict on those grounds, but final accuracy sign-off is the user's call, not something this
-pass can certify.
-
-## Verdict
-
-_Pending._
