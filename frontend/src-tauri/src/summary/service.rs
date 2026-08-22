@@ -2,8 +2,10 @@ use crate::database::repositories::{
     meeting::MeetingsRepository, setting::SettingsRepository, summary::SummaryProcessesRepository,
 };
 use crate::summary::llm_client::LLMProvider;
-use crate::summary::language_detection::detect_summary_language;
-use crate::summary::metadata::read_detected_summary_language_from_metadata;
+use crate::summary::language_detection::resolve_summary_language;
+use crate::summary::metadata::{
+    read_detected_summary_language_from_metadata, read_transcription_language_from_metadata,
+};
 use crate::summary::processor::{
     extract_meeting_name_from_markdown, generate_meeting_summary, language_name_from_code,
 };
@@ -337,9 +339,34 @@ impl SummaryService {
         }
     }
 
-    fn detect_summary_language_from_text(text: &str) -> Option<String> {
+    /// Reads the Transcription Language this meeting was recorded, imported, or
+    /// retranscribed with, when known (see phykawing/meetily#14) — consulted so a
+    /// Cantonese meeting still forces a Traditional Chinese summary even when no cached
+    /// `detected_summary_language` exists yet (e.g. summary generation before the
+    /// frontend's own detection pass ever ran).
+    async fn read_known_transcription_language(pool: &SqlitePool, meeting_id: &str) -> Option<String> {
+        let meeting = match MeetingsRepository::get_meeting_metadata(pool, meeting_id).await {
+            Ok(Some(meeting)) => meeting,
+            _ => return None,
+        };
+
+        let folder_path = meeting.folder_path.filter(|p| !p.trim().is_empty())?;
+
+        match read_transcription_language_from_metadata(Path::new(&folder_path)) {
+            Ok(language) => language,
+            Err(e) => {
+                warn!(
+                    "Failed to read transcription language metadata for meeting_id={}: {}",
+                    meeting_id, e
+                );
+                None
+            }
+        }
+    }
+
+    fn detect_summary_language_from_text(text: &str, transcription_language: Option<&str>) -> Option<String> {
         let transcript_texts = [text.to_string()];
-        let detection = detect_summary_language(&transcript_texts);
+        let detection = resolve_summary_language(transcription_language, &transcript_texts);
         match &detection.language {
             Some(language) => {
                 info!("Detected transcript summary language for normalization: {}", language);
@@ -469,10 +496,14 @@ impl SummaryService {
             info!("📝 Summary language preference: {}", code);
         }
 
-        let detected_summary_language =
-            Self::read_detected_summary_language(&pool, &meeting_id)
-                .await
-                .or_else(|| Self::detect_summary_language_from_text(&text));
+        let detected_summary_language = match Self::read_detected_summary_language(&pool, &meeting_id).await {
+            Some(cached) => Some(cached),
+            None => {
+                let transcription_language =
+                    Self::read_known_transcription_language(&pool, &meeting_id).await;
+                Self::detect_summary_language_from_text(&text, transcription_language.as_deref())
+            }
+        };
 
         if let Some(code) = &detected_summary_language {
             info!("📝 Detected transcript summary language: {}", code);

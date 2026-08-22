@@ -5,10 +5,11 @@ use crate::database::repositories::{
 use crate::state::AppState;
 use crate::summary::metadata::{
     read_detected_summary_language_from_metadata, read_summary_language_from_metadata,
-    write_detected_summary_language_to_metadata, write_summary_language_to_metadata,
+    read_transcription_language_from_metadata, write_detected_summary_language_to_metadata,
+    write_summary_language_to_metadata,
 };
 use crate::summary::language_detection::{
-    detect_summary_language, SummaryLanguageDetection,
+    resolve_summary_language, SummaryLanguageDetection,
 };
 use crate::summary::service::SummaryService;
 use log::{error as log_error, info as log_info, warn as log_warn};
@@ -199,12 +200,40 @@ pub async fn api_save_meeting_detected_summary_language<R: Runtime>(
     }
 }
 
+/// Gets the Transcription Language this meeting was recorded, imported, or retranscribed
+/// with, when one was explicitly known (e.g. "yue" for Cantonese) rather than left on
+/// auto-detect. `None` for auto-detected meetings and meetings recorded before this field
+/// existed — the caller should then fall back to detecting the language from the
+/// transcript itself (see phykawing/meetily#14).
+#[tauri::command]
+pub async fn api_get_meeting_transcription_language<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+) -> Result<Option<String>, String> {
+    match resolve_meeting_folder(state.db_manager.pool(), &meeting_id).await? {
+        MeetingFolderResolution::Folder(folder) => {
+            read_transcription_language_from_metadata(&folder).map_err(|e| e.to_string())
+        }
+        MeetingFolderResolution::NoFolder => Ok(None),
+    }
+}
+
 /// Detects the dominant supported summary language from transcript segments.
+///
+/// `transcription_language` is the Transcription Language the meeting was recorded or
+/// imported with, when known (e.g. "yue" for Cantonese). A known Cantonese language
+/// forces Traditional Chinese unconditionally; otherwise the language is detected from
+/// the transcript text itself, disambiguating Chinese script by character-set membership.
 #[tauri::command]
 pub async fn api_detect_transcript_summary_language(
     transcript_texts: Vec<String>,
+    transcription_language: Option<String>,
 ) -> Result<SummaryLanguageDetection, String> {
-    Ok(detect_summary_language(&transcript_texts))
+    Ok(resolve_summary_language(
+        transcription_language.as_deref(),
+        &transcript_texts,
+    ))
 }
 
 async fn resolve_meeting_folder(

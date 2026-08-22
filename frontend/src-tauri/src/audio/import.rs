@@ -665,6 +665,7 @@ async fn run_import<R: Runtime>(
         &dest_filename,
         "import",
         script_setting,
+        language.as_deref(),
     ) {
         warn!("Failed to write metadata.json: {}", e);
     }
@@ -894,12 +895,18 @@ fn write_import_metadata(
     audio_filename: &str,
     source: &str,
     script_setting: ScriptSetting,
+    transcription_language: Option<&str>,
 ) -> Result<()> {
     let metadata_path = folder.join("metadata.json");
     let temp_path = folder.join(".metadata.json.tmp");
     let now = chrono::Utc::now().to_rfc3339();
 
-    let json = serde_json::json!({
+    // "auto"/"auto-translate" mean no specific Transcription Language was chosen —
+    // recorded as absent, the same as an auto-detected meeting (see phykawing/meetily#14).
+    let known_transcription_language =
+        transcription_language.filter(|lang| *lang != "auto" && *lang != "auto-translate");
+
+    let mut json = serde_json::json!({
         "version": "1.0",
         "meeting_id": meeting_id,
         "meeting_name": title,
@@ -912,6 +919,9 @@ fn write_import_metadata(
         "source": source,
         "script": script_setting.as_str()
     });
+    if let Some(language) = known_transcription_language {
+        json["transcription_language"] = serde_json::json!(language);
+    }
 
     let json_string = serde_json::to_string_pretty(&json)?;
     std::fs::write(&temp_path, &json_string)?;
@@ -1248,6 +1258,7 @@ mod tests {
             "audio.mp4",
             "import",
             ScriptSetting::TraditionalHk,
+            Some("yue"),
         );
         assert!(result.is_ok(), "write_import_metadata failed: {:?}", result);
 
@@ -1264,6 +1275,33 @@ mod tests {
         assert_eq!(parsed["status"], "completed");
         assert_eq!(parsed["source"], "import");
         assert_eq!(parsed["script"], "traditional-hk");
+        assert_eq!(parsed["transcription_language"], "yue");
+    }
+
+    #[test]
+    fn test_write_import_metadata_omits_transcription_language_for_auto() {
+        let dir = tempfile::tempdir().unwrap();
+
+        for auto_value in [None, Some("auto"), Some("auto-translate")] {
+            write_import_metadata(
+                dir.path(),
+                "meeting-123",
+                "Test Meeting",
+                1800.0,
+                "audio.mp4",
+                "import",
+                ScriptSetting::TraditionalHk,
+                auto_value,
+            )
+            .unwrap();
+
+            let content = std::fs::read_to_string(dir.path().join("metadata.json")).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+            assert!(
+                parsed.get("transcription_language").is_none(),
+                "expected no transcription_language for {auto_value:?}"
+            );
+        }
     }
 
     /// Integration test that decodes a real audio file and runs VAD.

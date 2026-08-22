@@ -440,6 +440,13 @@ impl RecordingManager {
         self.recording_saver.set_script_setting(setting);
     }
 
+    /// Set the Transcription Language this recording session was started with (`None` for
+    /// auto-detect). Must be called before `start_recording` to be recorded in the
+    /// meeting's metadata.json.
+    pub fn set_transcription_language(&mut self, language: Option<&str>) {
+        self.recording_saver.set_transcription_language(language);
+    }
+
     /// Add a structured transcript segment to be saved later
     pub fn add_transcript_segment(&self, segment: super::recording_saver::TranscriptSegment) {
         self.recording_saver.add_transcript_segment(segment);

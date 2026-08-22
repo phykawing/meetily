@@ -81,6 +81,15 @@ async fn resolve_script_setting<R: Runtime>(app: &AppHandle<R>) -> ScriptSetting
     }
 }
 
+/// The current Transcription Language preference, if it names a specific language rather
+/// than auto-detection. Recorded in the meeting's metadata.json so summary language
+/// resolution can later consult it (see phykawing/meetily#14) — `None` here means "no
+/// Transcription Language to consult", the same as an auto-detected meeting.
+fn known_transcription_language() -> Option<String> {
+    crate::get_language_preference_internal()
+        .filter(|lang| lang != "auto" && lang != "auto-translate")
+}
+
 // ============================================================================
 // RECORDING COMMANDS
 // ============================================================================
@@ -250,6 +259,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // diverge if the user changes the setting mid-startup (see docs/adr/0003).
     let script_setting = resolve_script_setting(&app).await;
     manager.set_script_setting(script_setting.as_str());
+    manager.set_transcription_language(known_transcription_language().as_deref());
 
     // Set up error callback
     let app_for_error = app.clone();
@@ -427,6 +437,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // diverge if the user changes the setting mid-startup (see docs/adr/0003).
     let script_setting = resolve_script_setting(&app).await;
     manager.set_script_setting(script_setting.as_str());
+    manager.set_transcription_language(known_transcription_language().as_deref());
 
     // Set up error callback
     let app_for_error = app.clone();

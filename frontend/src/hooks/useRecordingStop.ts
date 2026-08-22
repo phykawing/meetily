@@ -11,6 +11,7 @@ import Analytics from '@/lib/analytics';
 import {
   applyPinnedSummaryLanguageToMeeting,
   detectAndCacheSummaryLanguage,
+  readMeetingTranscriptionLanguage,
 } from '@/lib/summary-language-preferences';
 
 type SummaryStatus = 'idle' | 'processing' | 'summarizing' | 'regenerating' | 'completed' | 'error';
@@ -277,9 +278,14 @@ export function useRecordingStop(
 
           if (shouldDetectSummaryLanguage) {
             try {
+              // Read back the Transcription Language actually recorded for this meeting
+              // (snapshotted server-side at recording start) rather than the live config
+              // value, which may have changed since the recording began.
+              const transcriptionLanguage = await readMeetingTranscriptionLanguage(meetingId);
               await detectAndCacheSummaryLanguage(
                 meetingId,
-                freshTranscripts.map(t => t.text)
+                freshTranscripts.map(t => t.text),
+                transcriptionLanguage
               );
             } catch (error) {
               console.warn('Failed to detect summary language for new meeting:', error);

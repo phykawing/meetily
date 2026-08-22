@@ -197,12 +197,31 @@ export async function saveCachedDetectedSummaryLanguage(
   writeLanguageFallback(DETECTED_SUMMARY_LANGUAGE_FALLBACK_PREFIX, meetingId, null);
 }
 
+/**
+ * Reads the Transcription Language this meeting was recorded, imported, or
+ * retranscribed with (e.g. "yue" for Cantonese), when one is known. Used to resolve the
+ * summary language: a known Cantonese Transcription Language forces Traditional Chinese
+ * (see phykawing/meetily#14). Returns null for folderless meetings, auto-detected
+ * meetings, and meetings recorded before this field existed.
+ */
+export async function readMeetingTranscriptionLanguage(
+  meetingId: string
+): Promise<string | null> {
+  try {
+    return await invoke<string | null>('api_get_meeting_transcription_language', { meetingId });
+  } catch (error) {
+    console.warn('Failed to read meeting transcription language:', error);
+    return null;
+  }
+}
+
 export async function detectTranscriptSummaryLanguage(
-  transcriptTexts: string[]
+  transcriptTexts: string[],
+  transcriptionLanguage?: string | null
 ): Promise<SummaryLanguageDetectionResult> {
   const detection = await invoke<SummaryLanguageDetectionResult>(
     'api_detect_transcript_summary_language',
-    { transcriptTexts }
+    { transcriptTexts, transcriptionLanguage: transcriptionLanguage || null }
   );
 
   return {
@@ -213,9 +232,10 @@ export async function detectTranscriptSummaryLanguage(
 
 export async function detectAndCacheSummaryLanguage(
   meetingId: string,
-  transcriptTexts: string[]
+  transcriptTexts: string[],
+  transcriptionLanguage?: string | null
 ): Promise<SummaryLanguageDetectionResult> {
-  const detection = await detectTranscriptSummaryLanguage(transcriptTexts);
+  const detection = await detectTranscriptSummaryLanguage(transcriptTexts, transcriptionLanguage);
 
   if (detection.language) {
     try {

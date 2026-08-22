@@ -11,6 +11,7 @@ import {
   detectAndCacheSummaryLanguage,
   readMeetingSummaryLanguage,
   readCachedDetectedSummaryLanguage,
+  readMeetingTranscriptionLanguage,
 } from '@/lib/summary-language-preferences';
 
 async function resolveSummaryLanguage(
@@ -34,8 +35,17 @@ async function resolveSummaryLanguage(
     console.warn('Failed to load cached detected summary language:', err);
   }
 
+  // Consult the Transcription Language this meeting was actually recorded/imported/
+  // retranscribed with, when known — a Cantonese meeting forces Traditional Chinese
+  // regardless of what script the stored transcript happens to be in (phykawing/meetily#14).
+  const transcriptionLanguage = await readMeetingTranscriptionLanguage(meetingId);
+
   try {
-    const detection = await detectAndCacheSummaryLanguage(meetingId, transcriptTexts);
+    const detection = await detectAndCacheSummaryLanguage(
+      meetingId,
+      transcriptTexts,
+      transcriptionLanguage
+    );
     if (detection.reason === 'tie') {
       toast.warning('Bilingual transcript detected', {
         description: 'Pick a summary language manually if Auto chooses the wrong fallback.',

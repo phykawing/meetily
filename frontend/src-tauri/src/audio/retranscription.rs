@@ -492,6 +492,7 @@ async fn run_retranscription<R: Runtime>(
         duration_seconds,
         &audio_filename,
         script_setting,
+        language.as_deref(),
     ) {
         warn!("Failed to update metadata.json: {}", e);
     }
@@ -739,10 +740,19 @@ fn write_retranscription_metadata(
     duration_seconds: f64,
     audio_filename: &str,
     script_setting: ScriptSetting,
+    transcription_language: Option<&str>,
 ) -> Result<()> {
     let metadata_path = folder.join("metadata.json");
     let temp_path = folder.join(".metadata.json.tmp");
     let now = chrono::Utc::now().to_rfc3339();
+
+    // "auto"/"auto-translate" mean no specific Transcription Language was chosen for this
+    // pass — cleared, the same as an auto-detected meeting (see phykawing/meetily#14). A
+    // prior pass's known language does not carry over: this retranscription is what
+    // actually produced the stored text, so its own language choice (or lack of one) is
+    // what should be consulted.
+    let known_transcription_language =
+        transcription_language.filter(|lang| *lang != "auto" && *lang != "auto-translate");
 
     // Try to read existing metadata and update it
     let json = if metadata_path.exists() {
@@ -753,11 +763,19 @@ fn write_retranscription_metadata(
             obj.insert("status".to_string(), serde_json::json!("completed"));
             obj.insert("transcript_file".to_string(), serde_json::json!("transcripts.json"));
             obj.insert("script".to_string(), serde_json::json!(script_setting.as_str()));
+            match known_transcription_language {
+                Some(language) => {
+                    obj.insert("transcription_language".to_string(), serde_json::json!(language));
+                }
+                None => {
+                    obj.remove("transcription_language");
+                }
+            }
             obj.remove("detected_summary_language");
         }
         value
     } else {
-        serde_json::json!({
+        let mut value = serde_json::json!({
             "version": "1.0",
             "meeting_id": meeting_id,
             "created_at": now,
@@ -769,7 +787,11 @@ fn write_retranscription_metadata(
             "status": "completed",
             "source": "retranscription",
             "script": script_setting.as_str()
-        })
+        });
+        if let Some(language) = known_transcription_language {
+            value["transcription_language"] = serde_json::json!(language);
+        }
+        value
     };
 
     let json_string = serde_json::to_string_pretty(&json)?;
@@ -1037,5 +1059,75 @@ mod tests {
         // Non-audio formats
         assert!(!AUDIO_EXTENSIONS.contains(&"txt"));
         assert!(!AUDIO_EXTENSIONS.contains(&"pdf"));
+    }
+
+    #[test]
+    fn write_retranscription_metadata_records_known_transcription_language() {
+        let dir = tempfile::tempdir().unwrap();
+
+        write_retranscription_metadata(
+            dir.path(),
+            "meeting-123",
+            1800.0,
+            "audio.mp4",
+            ScriptSetting::TraditionalHk,
+            Some("yue"),
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join("metadata.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["transcription_language"], "yue");
+    }
+
+    #[test]
+    fn write_retranscription_metadata_omits_transcription_language_for_auto_translate() {
+        let dir = tempfile::tempdir().unwrap();
+
+        write_retranscription_metadata(
+            dir.path(),
+            "meeting-123",
+            1800.0,
+            "audio.mp4",
+            ScriptSetting::TraditionalHk,
+            Some("auto-translate"),
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join("metadata.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(parsed.get("transcription_language").is_none());
+    }
+
+    #[test]
+    fn write_retranscription_metadata_clears_stale_language_on_auto_pass() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // First pass: Cantonese explicitly selected.
+        write_retranscription_metadata(
+            dir.path(),
+            "meeting-123",
+            1800.0,
+            "audio.mp4",
+            ScriptSetting::TraditionalHk,
+            Some("yue"),
+        )
+        .unwrap();
+
+        // Second pass: re-run with auto-detect. The prior Cantonese selection no longer
+        // reflects what actually produced the stored transcript, so it must not linger.
+        write_retranscription_metadata(
+            dir.path(),
+            "meeting-123",
+            1800.0,
+            "audio.mp4",
+            ScriptSetting::TraditionalHk,
+            None,
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join("metadata.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(parsed.get("transcription_language").is_none());
     }
 }

@@ -8,12 +8,36 @@ use super::processor::language_name_from_code;
 
 const SUMMARY_LANGUAGE_FIELD: &str = "summary_language";
 const DETECTED_SUMMARY_LANGUAGE_FIELD: &str = "detected_summary_language";
+const TRANSCRIPTION_LANGUAGE_FIELD: &str = "transcription_language";
 const METADATA_FILE: &str = "metadata.json";
 const METADATA_TEMP_FILE_PREFIX: &str = ".metadata.json.";
 static METADATA_WRITE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 pub(crate) fn read_summary_language_from_metadata(folder: &Path) -> Result<Option<String>> {
     read_language_field_from_metadata(folder, SUMMARY_LANGUAGE_FIELD)
+}
+
+/// Reads the Transcription Language this meeting was recorded, imported, or retranscribed
+/// with (e.g. "yue" for Cantonese), when one was explicitly known rather than left on
+/// auto-detect. Unlike `read_summary_language_from_metadata`, this is not validated against
+/// the supported summary-language list — it is a Whisper language token, not a summary
+/// output language (see phykawing/meetily#14).
+pub(crate) fn read_transcription_language_from_metadata(folder: &Path) -> Result<Option<String>> {
+    let metadata_path = metadata_path(folder);
+    if !metadata_path.exists() {
+        return Ok(None);
+    }
+
+    let raw = std::fs::read_to_string(&metadata_path)
+        .with_context(|| format!("Failed to read {}", metadata_path.display()))?;
+    let value = parse_metadata_json(&raw)?;
+
+    Ok(value
+        .get(TRANSCRIPTION_LANGUAGE_FIELD)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string))
 }
 
 pub(crate) fn read_detected_summary_language_from_metadata(
@@ -140,6 +164,44 @@ fn normalise_supported_summary_language(raw: &str) -> Result<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn transcription_language_reads_known_language() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("metadata.json"),
+            serde_json::to_string_pretty(&json!({
+                "version": "1.0",
+                "transcription_language": "yue"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_transcription_language_from_metadata(dir.path()).unwrap(),
+            Some("yue".to_string())
+        );
+    }
+
+    #[test]
+    fn transcription_language_missing_field_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("metadata.json"),
+            serde_json::to_string_pretty(&json!({ "version": "1.0" })).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(read_transcription_language_from_metadata(dir.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn transcription_language_missing_file_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert_eq!(read_transcription_language_from_metadata(dir.path()).unwrap(), None);
+    }
 
     #[test]
     fn summary_language_missing_field_returns_none() {

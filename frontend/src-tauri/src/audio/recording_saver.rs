@@ -47,6 +47,12 @@ pub struct MeetingMetadata {
     /// field existed.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub script: Option<String>,
+    /// The Transcription Language this meeting was recorded with, when one was
+    /// explicitly selected (e.g. "yue" for Cantonese) rather than left on auto-detect.
+    /// Consulted when resolving the summary language (phykawing/meetily#14). `None` for
+    /// auto-detected meetings and meetings recorded before this field existed.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub transcription_language: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +67,7 @@ pub struct RecordingSaver {
     meeting_folder: Option<PathBuf>,
     meeting_name: Option<String>,
     script_setting: Option<String>,
+    transcription_language: Option<String>,
     metadata: Option<MeetingMetadata>,
     transcript_segments: Arc<Mutex<Vec<TranscriptSegment>>>,
     chunk_receiver: Option<mpsc::UnboundedReceiver<AudioChunk>>,
@@ -74,6 +81,7 @@ impl RecordingSaver {
             meeting_folder: None,
             meeting_name: None,
             script_setting: None,
+            transcription_language: None,
             metadata: None,
             transcript_segments: Arc::new(Mutex::new(Vec::new())),
             chunk_receiver: None,
@@ -91,6 +99,14 @@ impl RecordingSaver {
     /// before `start_accumulation` to take effect.
     pub fn set_script_setting(&mut self, setting: &str) {
         self.script_setting = Some(setting.to_string());
+    }
+
+    /// Set the Transcription Language this recording session was started with, so it is
+    /// recorded in metadata.json when the meeting folder is initialized. `None` means
+    /// auto-detect (no known Transcription Language). Must be called before
+    /// `start_accumulation` to take effect.
+    pub fn set_transcription_language(&mut self, language: Option<&str>) {
+        self.transcription_language = language.map(str::to_string);
     }
 
     /// Set device information in metadata
@@ -279,6 +295,7 @@ impl RecordingSaver {
             sample_rate: 48000,
             status: "recording".to_string(),
             script: self.script_setting.clone(),
+            transcription_language: self.transcription_language.clone(),
         };
 
         // Write initial metadata.json
