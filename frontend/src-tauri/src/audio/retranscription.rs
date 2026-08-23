@@ -450,6 +450,17 @@ async fn run_retranscription<R: Runtime>(
         .await
         .map_err(|e| anyhow!("Failed to delete existing transcripts: {}", e))?;
 
+    // Re-inserted rows below never set speaker_label, so any prior diarization
+    // attribution is already gone from `transcripts` - but the per-meeting speaker names
+    // (meeting_speakers) would otherwise survive pointing at labels no row carries
+    // anymore. Clear them too, mirroring diarization's own "re-run discards names"
+    // behavior (docs/adr/0001) for the case where retranscription is what invalidates them.
+    sqlx::query("DELETE FROM meeting_speakers WHERE meeting_id = ?")
+        .bind(&meeting_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| anyhow!("Failed to clear stale speaker names: {}", e))?;
+
     for segment in &segments {
         sqlx::query(
             "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration)
@@ -829,6 +840,13 @@ pub async fn start_retranscription_command<R: Runtime>(
     // Check if retranscription is already in progress (guard will be acquired in start_retranscription)
     if RETRANSCRIPTION_IN_PROGRESS.load(Ordering::SeqCst) {
         return Err("Retranscription already in progress".to_string());
+    }
+    // Retranscription deletes and re-inserts transcript rows by id; a diarization pass
+    // reading/updating those same rows concurrently would silently no-op instead of
+    // erroring. Refusing to start against each other closes that window - see
+    // diarization::commands::run_diarization_command's matching check.
+    if crate::diarization::pipeline::is_diarization_in_progress() {
+        return Err("Retranscription can't run while speaker detection is in progress".to_string());
     }
 
     // Clone values for the spawned task

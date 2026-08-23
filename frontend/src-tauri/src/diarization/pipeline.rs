@@ -103,6 +103,16 @@ fn emit_progress<R: Runtime>(
 /// event. Callers must have already confirmed `diarization_model_status().ready` -
 /// consent and model presence are not re-checked here (see docs/adr/0005: that status
 /// check is the single source of truth this is meant to consume, not reassemble).
+///
+/// The single-flight guard is acquired *inside* this function (not by the caller) and its
+/// failure still goes through the same `diarization-error` emission as any other failure:
+/// the caller (`run_diarization_command`) checks `is_diarization_in_progress()` before
+/// spawning this as a background task and returning success to the frontend, but that
+/// check and this guard acquisition aren't atomic with each other, so two near-simultaneous
+/// calls can both pass the caller's check. Without this, the losing call's task would
+/// return `Err` before ever reaching the emit logic, and the UI (which is already showing
+/// a "detecting…" state after the earlier Ok) would wait forever for an event that never
+/// arrives.
 pub async fn run_diarization<R: Runtime>(
     app: AppHandle<R>,
     pool: SqlitePool,
@@ -110,14 +120,12 @@ pub async fn run_diarization<R: Runtime>(
     meeting_folder_path: String,
     base_models_dir: PathBuf,
 ) -> Result<DiarizationResult> {
-    let _guard = DiarizationGuard::acquire().map_err(|e| anyhow!(e))?;
-
-    let result = run_diarization_inner(
+    let result = run_diarization_guarded(
         &app,
-        &pool,
+        pool,
         &meeting_id,
-        &meeting_folder_path,
-        &base_models_dir,
+        meeting_folder_path,
+        base_models_dir,
     )
     .await;
 
@@ -137,6 +145,17 @@ pub async fn run_diarization<R: Runtime>(
     }
 
     result
+}
+
+async fn run_diarization_guarded<R: Runtime>(
+    app: &AppHandle<R>,
+    pool: SqlitePool,
+    meeting_id: &str,
+    meeting_folder_path: String,
+    base_models_dir: PathBuf,
+) -> Result<DiarizationResult> {
+    let _guard = DiarizationGuard::acquire().map_err(|e| anyhow!(e))?;
+    run_diarization_inner(app, &pool, meeting_id, &meeting_folder_path, &base_models_dir).await
 }
 
 async fn run_diarization_inner<R: Runtime>(

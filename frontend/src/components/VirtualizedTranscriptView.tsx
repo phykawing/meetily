@@ -104,8 +104,13 @@ const TranscriptSegment = memo(function TranscriptSegment({
             id={`segment-${id}`}
             className={`mb-3${borderClass ? ` border-l-2 pl-2 ${borderClass}` : ''}`}
         >
-            {showSpeakerLabel && (speakerName || speakerUncertain) && (
-                <SpeakerIndicator name={speakerName} uncertain={speakerUncertain} />
+            {/* The name badge only appears on the first segment of a consecutive run
+                (showSpeakerLabel) so a long turn doesn't repeat it every line - but the
+                uncertain flag must appear on *every* uncertain segment regardless of
+                grouping, since a later segment in an otherwise-settled run can itself be
+                the one that straddles a speaker change. */}
+            {(showSpeakerLabel ? speakerName || speakerUncertain : speakerUncertain) && (
+                <SpeakerIndicator name={showSpeakerLabel ? speakerName : undefined} uncertain={speakerUncertain} />
             )}
             <div className="flex items-start gap-2">
                 <Tooltip>

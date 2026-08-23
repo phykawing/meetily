@@ -219,6 +219,15 @@ pub async fn run_diarization_command(
     if pipeline::is_diarization_in_progress() {
         return Err("Speaker detection is already running".to_string());
     }
+    // Retranscription deletes and re-inserts a meeting's transcript rows with fresh ids
+    // (audio/retranscription.rs); if that races with a diarization pass reading/updating
+    // those same rows by id, diarization's updates silently match nothing and it would
+    // still report success. Refusing to start against each other closes that window.
+    if crate::audio::retranscription::is_retranscription_in_progress() {
+        return Err(
+            "Speaker detection can't run while this meeting is being retranscribed".to_string(),
+        );
+    }
 
     let consent: DiarizationConsent = setting_store::DIARIZATION_CONSENT
         .read(state.db_manager.pool())

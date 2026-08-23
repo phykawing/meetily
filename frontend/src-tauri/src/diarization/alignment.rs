@@ -48,12 +48,15 @@ pub struct ChunkAttribution {
 /// A chunk is `uncertain` exactly when more than one *distinct* speaker has nonzero
 /// overlap with it, regardless of how small.
 ///
-/// Ties in total overlap are broken in favor of whichever speaker's turn appears first in
-/// `turns` — callers should pass turns in start-time order (as
-/// `OfflineSpeakerDiarizationResult::sort_by_start_time` already returns them) so "first"
-/// means "earliest".
+/// Ties in total overlap are broken in favor of whichever speaker's turn starts earliest.
+/// `turns` is sorted internally, so callers don't need to pre-sort it themselves (this
+/// used to be a caller contract enforced only by a doc comment; sorting here removes that
+/// fragile dependency).
 pub fn align_chunks_to_turns(chunks: &[ChunkSpan], turns: &[SpeakerTurn]) -> Vec<ChunkAttribution> {
-    chunks.iter().map(|chunk| attribute_chunk(chunk, turns)).collect()
+    let mut sorted_turns = turns.to_vec();
+    sorted_turns.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
+
+    chunks.iter().map(|chunk| attribute_chunk(chunk, &sorted_turns)).collect()
 }
 
 fn attribute_chunk(chunk: &ChunkSpan, turns: &[SpeakerTurn]) -> ChunkAttribution {
@@ -210,6 +213,19 @@ mod tests {
     fn exact_overlap_tie_is_broken_by_whichever_speaker_appears_first_in_turns() {
         let chunks = [chunk("c1", 0.0, 10.0)];
         let turns = [turn("speaker_00", 0.0, 5.0), turn("speaker_01", 5.0, 10.0)];
+
+        let result = align_chunks_to_turns(&chunks, &turns);
+
+        assert_eq!(result[0].speaker.as_deref(), Some("speaker_00"));
+        assert!(result[0].uncertain);
+    }
+
+    #[test]
+    fn tie_break_is_correct_even_when_turns_are_passed_out_of_start_time_order() {
+        // Same tie as above, but handed in reverse order - align_chunks_to_turns must
+        // sort internally rather than trusting caller order.
+        let chunks = [chunk("c1", 0.0, 10.0)];
+        let turns = [turn("speaker_01", 5.0, 10.0), turn("speaker_00", 0.0, 5.0)];
 
         let result = align_chunks_to_turns(&chunks, &turns);
 

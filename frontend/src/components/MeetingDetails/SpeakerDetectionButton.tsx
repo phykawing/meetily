@@ -79,7 +79,9 @@ export function SpeakerDetectionButton({ meetingId, meetingFolderPath, onComplet
         setIsRunning(false);
         setProgressMessage(null);
         toast.success(
-          event.payload.num_speakers <= 1
+          event.payload.num_speakers === 0
+            ? 'Speaker detection complete - no distinct speakers found'
+            : event.payload.num_speakers === 1
             ? 'Speaker detection complete - one speaker found'
             : `Speaker detection complete - ${event.payload.num_speakers} speakers found`
         );

@@ -92,6 +92,7 @@ impl MeetingsRepository {
                     audio_start_time: t.audio_start_time,
                     audio_end_time: t.audio_end_time,
                     duration: t.duration,
+                    audio_source: t.audio_source,
                     speaker_label: t.speaker_label,
                     speaker_uncertain: t.speaker_uncertain,
                 })
@@ -275,7 +276,15 @@ async fn delete_meeting_with_transaction(
         .execute(&mut *transaction)
         .await?;
 
-    // 5. Finally, delete the meeting
+    // 5. Delete diarized speaker names (see database/repositories/speaker.rs,
+    // phykawing/meetily#16). Same reasoning as transcript_renderings above: no enforced
+    // FK cascade, so this must be explicit.
+    sqlx::query("DELETE FROM meeting_speakers WHERE meeting_id = ?")
+        .bind(meeting_id)
+        .execute(&mut *transaction)
+        .await?;
+
+    // 6. Finally, delete the meeting
     let result = sqlx::query("DELETE FROM meetings WHERE id = ?")
         .bind(meeting_id)
         .execute(&mut *transaction)
@@ -340,5 +349,55 @@ mod tests {
             .await
             .unwrap()
             .is_none());
+    }
+
+    /// Same reasoning as `deleting_a_meeting_removes_its_cached_rendering`:
+    /// `meeting_speakers` also declares an inert `ON DELETE CASCADE`, so deleting a meeting
+    /// must clean it up explicitly or a diarized meeting's speaker names survive it.
+    #[tokio::test]
+    async fn deleting_a_meeting_removes_its_speaker_names() {
+        use crate::database::repositories::speaker::{SpeakerName, SpeakerRepository};
+
+        let pool = migrated_pool().await;
+
+        let meeting_id = TranscriptsRepository::save_transcript(
+            &pool,
+            "Test meeting",
+            &[TranscriptSegment {
+                id: "seg-0".to_string(),
+                text: "hello".to_string(),
+                timestamp: "0".to_string(),
+                audio_start_time: Some(0.0),
+                audio_end_time: Some(1.0),
+                duration: Some(1.0),
+                audio_source: None,
+            }],
+            None,
+        )
+        .await
+        .unwrap();
+
+        SpeakerRepository::replace_diarization_results(
+            &pool,
+            &meeting_id,
+            &[],
+            &[SpeakerName { label: "speaker_00".to_string(), name: "Speaker 1".to_string() }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            SpeakerRepository::get_meeting_speakers(&pool, &meeting_id).await.unwrap().len(),
+            1
+        );
+
+        let deleted = MeetingsRepository::delete_meeting(&pool, &meeting_id)
+            .await
+            .unwrap();
+        assert!(deleted);
+
+        assert!(SpeakerRepository::get_meeting_speakers(&pool, &meeting_id)
+            .await
+            .unwrap()
+            .is_empty());
     }
 }

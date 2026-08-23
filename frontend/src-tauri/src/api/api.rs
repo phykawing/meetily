@@ -137,6 +137,10 @@ pub struct MeetingTranscript {
     pub audio_end_time: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<f64>,
+    // Live Audio Source hint (see docs/adr/0001, docs/adr/0004): "mic" | "system" |
+    // "mixed". `None` for meetings recorded before this existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_source: Option<String>,
     // The diarized Speaker's per-meeting label (e.g. "speaker_00"), distinct from Audio
     // Source - see docs/adr/0004. `None` until a diarization pass has covered this chunk.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -889,6 +893,7 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
                     audio_start_time: t.audio_start_time,
                     audio_end_time: t.audio_end_time,
                     duration: t.duration,
+                    audio_source: t.audio_source,
                     speaker_label: t.speaker_label,
                     speaker_uncertain: t.speaker_uncertain,
                 })
