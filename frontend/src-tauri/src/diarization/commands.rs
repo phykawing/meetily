@@ -1,7 +1,9 @@
 use crate::database::repositories::setting_store::{self, SettingToken};
+use crate::database::repositories::speaker::SpeakerRepository;
 use crate::diarization::consent::DiarizationConsent;
 use crate::diarization::manager;
 use crate::diarization::models::{total_size_bytes, DIARIZATION_MODELS};
+use crate::diarization::pipeline;
 use crate::state::AppState;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -180,4 +182,94 @@ async fn download_diarization_models_inner(
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// Response when a diarization pass has been kicked off in the background. Matches
+/// `audio::retranscription::RetranscriptionStarted`'s plain snake_case shape.
+#[derive(Serialize)]
+pub struct DiarizationStarted {
+    meeting_id: String,
+    message: String,
+}
+
+/// One discovered speaker's display name, for resolving `speaker_label` on transcript
+/// rows into something human-readable.
+#[derive(Serialize)]
+pub struct MeetingSpeakerInfo {
+    label: String,
+    name: String,
+}
+
+/// Starts a diarization pass for `meeting_id` in the background, emitting
+/// `diarization-progress` / `diarization-complete` / `diarization-error` events as it
+/// runs (see `diarization::pipeline`).
+///
+/// Re-checks consent and model readiness itself rather than trusting the caller — this is
+/// the enforced gate, mirroring `download_diarization_models`. The frontend must not be
+/// able to reach a diarization run by skipping past a declined/unanswered consent prompt
+/// (see docs/adr/0005, which blocked this issue on #10 specifically so it could consume
+/// that readiness check rather than reassemble it).
+#[command]
+pub async fn run_diarization_command(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+    meeting_folder_path: String,
+) -> Result<DiarizationStarted, String> {
+    if pipeline::is_diarization_in_progress() {
+        return Err("Speaker detection is already running".to_string());
+    }
+
+    let consent: DiarizationConsent = setting_store::DIARIZATION_CONSENT
+        .read(state.db_manager.pool())
+        .await
+        .map_err(|e| format!("Failed to get diarization consent: {}", e))?;
+    let base_dir = base_models_dir(&app)?;
+    if consent != DiarizationConsent::Granted || !manager::all_models_downloaded(&base_dir) {
+        return Err(
+            "Speaker detection isn't enabled yet. Enable it under Settings > Preferences first."
+                .to_string(),
+        );
+    }
+
+    let pool = state.db_manager.pool().clone();
+    let app_for_task = app.clone();
+    let meeting_id_for_task = meeting_id.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = pipeline::run_diarization(
+            app_for_task,
+            pool,
+            meeting_id_for_task,
+            meeting_folder_path,
+            base_dir,
+        )
+        .await
+        {
+            // The pipeline already emits a `diarization-error` event; this is just for
+            // the log.
+            log::error!("Diarization failed: {}", e);
+        }
+    });
+
+    Ok(DiarizationStarted {
+        meeting_id,
+        message: "Speaker detection started".to_string(),
+    })
+}
+
+/// The meeting's discovered speakers and their display names. Empty until a diarization
+/// pass has completed for this meeting.
+#[command]
+pub async fn get_meeting_speakers(
+    meeting_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<MeetingSpeakerInfo>, String> {
+    let speakers = SpeakerRepository::get_meeting_speakers(state.db_manager.pool(), &meeting_id)
+        .await
+        .map_err(|e| format!("Failed to get meeting speakers: {}", e))?;
+
+    Ok(speakers
+        .into_iter()
+        .map(|s| MeetingSpeakerInfo { label: s.label, name: s.name })
+        .collect())
 }

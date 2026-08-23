@@ -37,6 +37,9 @@ function convertTranscriptsToSegments(transcripts: Transcript[]): TranscriptSegm
         endTime: t.audio_end_time,
         text: t.text,
         confidence: t.confidence,
+        audioSource: t.audio_source,
+        speakerLabel: t.speaker_label,
+        speakerUncertain: t.speaker_uncertain,
     }));
 }
 

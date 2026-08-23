@@ -6,6 +6,7 @@ import { ButtonGroup } from '@/components/ui/button-group';
 import { Copy, FolderOpen, RefreshCw } from 'lucide-react';
 import Analytics from '@/lib/analytics';
 import { RetranscribeDialog } from './RetranscribeDialog';
+import { SpeakerDetectionButton } from './SpeakerDetectionButton';
 import { useConfig } from '@/contexts/ConfigContext';
 
 
@@ -82,6 +83,14 @@ export function TranscriptButtonGroup({
             <RefreshCw className="xl:mr-2" size={18} />
             <span className="hidden lg:inline">Enhance</span>
           </Button>
+        )}
+
+        {meetingId && meetingFolderPath && (
+          <SpeakerDetectionButton
+            meetingId={meetingId}
+            meetingFolderPath={meetingFolderPath}
+            onComplete={onRefetchTranscripts}
+          />
         )}
       </ButtonGroup>
 

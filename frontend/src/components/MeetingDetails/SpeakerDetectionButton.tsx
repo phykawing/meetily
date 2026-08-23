@@ -1,0 +1,136 @@
+'use client';
+
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import { Button } from '@/components/ui/button';
+import { Users, Loader2 } from 'lucide-react';
+import { toast } from 'sonner';
+import Analytics from '@/lib/analytics';
+
+interface SpeakerDetectionButtonProps {
+  meetingId: string;
+  meetingFolderPath: string;
+  onComplete?: () => Promise<void> | void;
+}
+
+interface DiarizationStatus {
+  consent: 'not_asked' | 'granted' | 'declined';
+  ready: boolean;
+}
+
+interface DiarizationProgress {
+  meeting_id: string;
+  stage: string;
+  progress_percentage: number;
+  message: string;
+}
+
+interface DiarizationResult {
+  meeting_id: string;
+  num_speakers: number;
+  num_segments_flagged: number;
+}
+
+interface DiarizationError {
+  meeting_id: string;
+  error: string;
+}
+
+/**
+ * Triggers a post-meeting diarization pass on demand (phykawing/meetily#16). The models
+ * themselves are downloaded behind a separate consent prompt (Settings > Speaker
+ * Detection, #10) - this button only runs the pass once that's ready, and otherwise
+ * points the user there rather than duplicating the download flow inline.
+ */
+export function SpeakerDetectionButton({ meetingId, meetingFolderPath, onComplete }: SpeakerDetectionButtonProps) {
+  const [ready, setReady] = useState(false);
+  const [isRunning, setIsRunning] = useState(false);
+  const [progressMessage, setProgressMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke<DiarizationStatus>('diarization_model_status')
+      .then((status) => {
+        if (!cancelled) setReady(status.ready);
+      })
+      .catch((error) => {
+        console.error('Failed to load diarization model status:', error);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [meetingId]);
+
+  const onCompleteRef = useRef(onComplete);
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+  }, [onComplete]);
+
+  useEffect(() => {
+    const unlistenPromises = [
+      listen<DiarizationProgress>('diarization-progress', (event) => {
+        if (event.payload.meeting_id === meetingId) {
+          setProgressMessage(event.payload.message);
+        }
+      }),
+      listen<DiarizationResult>('diarization-complete', async (event) => {
+        if (event.payload.meeting_id !== meetingId) return;
+        setIsRunning(false);
+        setProgressMessage(null);
+        toast.success(
+          event.payload.num_speakers <= 1
+            ? 'Speaker detection complete - one speaker found'
+            : `Speaker detection complete - ${event.payload.num_speakers} speakers found`
+        );
+        if (onCompleteRef.current) {
+          await onCompleteRef.current();
+        }
+      }),
+      listen<DiarizationError>('diarization-error', (event) => {
+        if (event.payload.meeting_id !== meetingId) return;
+        setIsRunning(false);
+        setProgressMessage(null);
+        toast.error('Speaker detection failed', { description: event.payload.error });
+      }),
+    ];
+
+    return () => {
+      unlistenPromises.forEach((p) => p.then((unlisten) => unlisten()));
+    };
+  }, [meetingId]);
+
+  const handleClick = useCallback(async () => {
+    Analytics.trackButtonClick('detect_speakers', 'meeting_details');
+
+    setIsRunning(true);
+    setProgressMessage('Starting...');
+    try {
+      // The command itself is the authoritative gate (re-checks consent + model
+      // readiness), so this always attempts the call rather than trusting the `ready`
+      // state fetched at mount, which could be stale if the user granted consent in
+      // Settings without reloading this page.
+      await invoke('run_diarization_command', { meetingId, meetingFolderPath });
+    } catch (error) {
+      setIsRunning(false);
+      setProgressMessage(null);
+      toast.error('Could not start speaker detection', {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }, [meetingId, meetingFolderPath]);
+
+  return (
+    <Button
+      size="sm"
+      variant="outline"
+      className="xl:px-4"
+      onClick={handleClick}
+      disabled={isRunning}
+      title={ready ? 'Detect speakers in this recording' : 'Enable Speaker Detection under Settings > Preferences first'}
+    >
+      {isRunning ? <Loader2 className="xl:mr-2 animate-spin" size={18} /> : <Users className="xl:mr-2" size={18} />}
+      <span className="hidden lg:inline">{isRunning ? (progressMessage ?? 'Detecting...') : 'Speakers'}</span>
+    </Button>
+  );
+}

@@ -5,7 +5,9 @@
 // future work; this module only answers "do we have consent, and are the models on
 // disk," and performs the download once consent is granted.
 
+pub mod alignment;
 pub mod commands;
 pub mod consent;
 pub mod manager;
 pub mod models;
+pub mod pipeline;

@@ -19,6 +19,14 @@ export interface Transcript {
   // Live Audio Source hint (see docs/adr/0001, docs/adr/0004): "mic" | "system" | "mixed".
   // Undefined for meetings recorded before this field existed.
   audio_source?: string;
+  // The diarized Speaker's per-meeting label (e.g. "speaker_00"), distinct from
+  // audio_source - see docs/adr/0004. Undefined until a diarization pass covers this
+  // chunk. Resolve to a display name via the meeting's speakers list (get_meeting_speakers).
+  speaker_label?: string;
+  // True when diarization found more than one distinct speaker overlapping this segment -
+  // it's still attributed to the dominant one, but the attribution is a best guess.
+  // Undefined for a chunk not yet covered by diarization, same as speaker_label.
+  speaker_uncertain?: boolean;
 }
 
 export interface TranscriptUpdate {
@@ -114,4 +122,9 @@ export interface TranscriptSegmentData {
   // Live Audio Source hint: "mic" | "system" | "mixed". Undefined when not captured
   // (e.g. meetings recorded before this existed, or non-live views).
   audioSource?: string;
+  // The diarized Speaker's per-meeting label (e.g. "speaker_00"). Undefined until a
+  // diarization pass covers this segment.
+  speakerLabel?: string;
+  // True when the segment straddled a speaker change and was assigned the dominant one.
+  speakerUncertain?: boolean;
 }

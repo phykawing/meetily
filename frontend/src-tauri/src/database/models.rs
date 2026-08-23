@@ -41,6 +41,14 @@ pub struct Transcript {
     /// docs/adr/0004.
     #[sqlx(rename = "speaker")]
     pub audio_source: Option<String>,
+    /// The diarized Speaker's per-meeting label (e.g. "speaker_00"), or `None` if this
+    /// chunk has not been covered by a diarization run. Distinct from `audio_source` -
+    /// see docs/adr/0004.
+    pub speaker_label: Option<String>,
+    /// True when diarization found more than one distinct speaker overlapping this
+    /// chunk - it was assigned the dominant one, but the attribution is a best guess.
+    /// See `diarization::alignment`.
+    pub speaker_uncertain: bool,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]

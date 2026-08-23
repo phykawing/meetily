@@ -106,6 +106,14 @@ silero_rs = { git = "https://github.com/emotechlab/silero-rs", rev = "26a6460", 
 ort = { version = "2.0.0-rc.10" }  # ONNX Runtime for Parakeet models
 thiserror = "2.0.16"                # Error handling for Parakeet
 
+# Speaker diarization (segmentation + embedding + clustering) — bundles its own ONNX
+# Runtime, independent of `ort` above. Uses the `shared` (DLL) link mode: the prebuilt
+# static libs use MSVC's static CRT (/MT) while whisper-rs-sys's cmake build uses the
+# dynamic CRT (/MD), and statically linking both into one binary is a CRT ABI conflict
+# (duplicate-symbol LNK2005s). Shared linking avoids that by isolating sherpa-onnx's CRT
+# usage inside its own DLL.
+sherpa-onnx = { version = "1.13.5", default-features = false, features = ["shared"] }
+
 # Async
 tokio = { version = "1.32.0", features = ["full", "tracing"] }
 tokio-util = "0.7"  # Utilities for tokio including CancellationToken

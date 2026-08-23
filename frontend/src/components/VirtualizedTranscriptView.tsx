@@ -6,6 +6,7 @@ import { useAutoScroll } from "@/hooks/useAutoScroll";
 import { useTranscriptStreaming } from "@/hooks/useTranscriptStreaming";
 import { ConfidenceIndicator } from "./ConfidenceIndicator";
 import { AudioSourceIndicator } from "./AudioSourceIndicator";
+import { SpeakerIndicator, speakerBorderClasses } from "./SpeakerIndicator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
@@ -35,6 +36,10 @@ export interface VirtualizedTranscriptViewProps {
     totalCount?: number;
     loadedCount?: number;
     onLoadMore?: () => void;
+
+    /** Resolved speaker_label -> display name (e.g. "speaker_00" -> "Speaker 1"), from
+     * `get_meeting_speakers`. Empty/undefined for meetings not yet diarized. */
+    speakerNames?: Record<string, string>;
 }
 
 // Threshold for enabling virtualization (below this, use simple rendering)
@@ -71,6 +76,9 @@ const TranscriptSegment = memo(function TranscriptSegment({
     text,
     confidence,
     audioSource,
+    speakerName,
+    speakerUncertain,
+    showSpeakerLabel,
     isStreaming,
     showConfidence,
 }: {
@@ -79,13 +87,26 @@ const TranscriptSegment = memo(function TranscriptSegment({
     text: string;
     confidence?: number;
     audioSource?: string;
+    /** Resolved display name for this segment's speaker, or undefined when not diarized. */
+    speakerName?: string;
+    speakerUncertain?: boolean;
+    /** Whether to show the speaker name badge - only the first segment of a consecutive
+     * run from the same speaker does, so a long turn doesn't repeat the name every line. */
+    showSpeakerLabel: boolean;
     isStreaming: boolean;
     showConfidence: boolean;
 }) {
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
+    const borderClass = speakerName ? speakerBorderClasses(speakerName) : undefined;
 
     return (
-        <div id={`segment-${id}`} className="mb-3">
+        <div
+            id={`segment-${id}`}
+            className={`mb-3${borderClass ? ` border-l-2 pl-2 ${borderClass}` : ''}`}
+        >
+            {showSpeakerLabel && (speakerName || speakerUncertain) && (
+                <SpeakerIndicator name={speakerName} uncertain={speakerUncertain} />
+            )}
             <div className="flex items-start gap-2">
                 <Tooltip>
                     <TooltipTrigger>
@@ -128,6 +149,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     totalCount = 0,
     loadedCount = 0,
     onLoadMore,
+    speakerNames,
 }) => {
     // Create scroll ref first - shared between virtualizer and auto-scroll hook
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -279,6 +301,8 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                         {virtualizer.getVirtualItems().map((virtualRow) => {
                             const segment = segments[virtualRow.index];
                             const isStreaming = streamingSegmentId === segment.id;
+                            const previous = segments[virtualRow.index - 1];
+                            const showSpeakerLabel = previous?.speakerLabel !== segment.speakerLabel;
 
                             return (
                                 <div
@@ -299,6 +323,9 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
                                         audioSource={segment.audioSource}
+                                        speakerName={segment.speakerLabel ? speakerNames?.[segment.speakerLabel] : undefined}
+                                        speakerUncertain={segment.speakerUncertain}
+                                        showSpeakerLabel={showSpeakerLabel}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
                                     />
@@ -340,8 +367,10 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                 // Simple rendering for small lists (better animations)
                 <>
                     <div className="space-y-1">
-                        {segments.map((segment) => {
+                        {segments.map((segment, index) => {
                             const isStreaming = streamingSegmentId === segment.id;
+                            const previous = segments[index - 1];
+                            const showSpeakerLabel = previous?.speakerLabel !== segment.speakerLabel;
 
                             return (
                                 <motion.div
@@ -356,6 +385,9 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
                                         audioSource={segment.audioSource}
+                                        speakerName={segment.speakerLabel ? speakerNames?.[segment.speakerLabel] : undefined}
+                                        speakerUncertain={segment.speakerUncertain}
+                                        showSpeakerLabel={showSpeakerLabel}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
                                     />

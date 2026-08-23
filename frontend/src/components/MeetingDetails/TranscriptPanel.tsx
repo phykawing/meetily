@@ -6,6 +6,7 @@ import { VirtualizedTranscriptView } from '@/components/VirtualizedTranscriptVie
 import { TranscriptButtonGroup } from './TranscriptButtonGroup';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Loader2 } from 'lucide-react';
@@ -67,8 +68,44 @@ export function TranscriptPanel({
       endTime: t.audio_end_time,
       text: t.text,
       confidence: t.confidence,
+      audioSource: t.audio_source,
+      speakerLabel: t.speaker_label,
+      speakerUncertain: t.speaker_uncertain,
     }));
   }, [transcripts, usePagination, segments]);
+
+  // Discovered speaker names for this meeting (speaker_label -> display name), from the
+  // most recent diarization pass (phykawing/meetily#16). Empty for a meeting that hasn't
+  // been diarized yet - segments then render exactly as before diarization existed.
+  const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
+
+  const refreshSpeakerNames = useCallback(async () => {
+    if (!meetingId) {
+      setSpeakerNames({});
+      return;
+    }
+    try {
+      const speakers = await invoke<{ label: string; name: string }[]>('get_meeting_speakers', { meetingId });
+      setSpeakerNames(Object.fromEntries(speakers.map((s) => [s.label, s.name])));
+    } catch (error) {
+      console.error('Failed to load meeting speakers:', error);
+    }
+  }, [meetingId]);
+
+  useEffect(() => {
+    refreshSpeakerNames();
+  }, [refreshSpeakerNames]);
+
+  useEffect(() => {
+    const unlisten = listen<{ meeting_id: string }>('diarization-complete', (event) => {
+      if (event.payload.meeting_id === meetingId) {
+        refreshSpeakerNames();
+      }
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [meetingId, refreshSpeakerNames]);
 
   // Written Form: 口語 (verbatim, the Canonical Transcript) is the default view. 書面語 is a
   // cached Rendering produced by the local model on demand — see phykawing/meetily#8 and
@@ -274,6 +311,7 @@ export function TranscriptPanel({
             totalCount={totalCount}
             loadedCount={loadedCount}
             onLoadMore={onLoadMore}
+            speakerNames={speakerNames}
           />
         )}
       </div>
