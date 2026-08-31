@@ -89,6 +89,34 @@ impl SpeakerRepository {
         tx.commit().await
     }
 
+    /// Renames one discovered speaker in one meeting, overwriting its `display_name`.
+    /// Returns the number of rows updated: 0 means there is no such
+    /// `(meeting_id, speaker_label)` pair - the caller surfaces that as an error rather
+    /// than a silent success, since a re-run discards and rebuilds labels (ADR-0001) and a
+    /// stale badge in an already-open view can try to rename a label that no longer exists.
+    ///
+    /// The rename applies across the whole meeting at once because every transcript row
+    /// resolves its speaker through this one per-meeting label -> name mapping; nothing on
+    /// the `transcripts` rows themselves changes. Names are scoped to this meeting: the same
+    /// `speaker_label` in another meeting is a different row and is untouched.
+    pub async fn rename_speaker(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        speaker_label: &str,
+        display_name: &str,
+    ) -> Result<u64, SqlxError> {
+        let result = sqlx::query(
+            "UPDATE meeting_speakers SET display_name = ? WHERE meeting_id = ? AND speaker_label = ?",
+        )
+        .bind(display_name)
+        .bind(meeting_id)
+        .bind(speaker_label)
+        .execute(pool)
+        .await?;
+
+        Ok(result.rows_affected())
+    }
+
     /// The meeting's discovered speakers and their display names, for resolving
     /// `speaker_label` on transcript rows into something human-readable. Empty until a
     /// diarization pass has run.
@@ -279,6 +307,102 @@ mod tests {
         let row2 = fetch_row(&pool, &id2).await;
         assert_eq!(row2.speaker_label, None);
         assert!(!row2.speaker_uncertain);
+
+        let speakers = SpeakerRepository::get_meeting_speakers(&pool, &meeting_id).await.unwrap();
+        assert_eq!(speakers.len(), 1);
+        assert_eq!(speakers[0].name, "Speaker 1");
+    }
+
+    /// Seeds a meeting with two default-named speakers over two chunks, returning the
+    /// meeting id. Mirrors what a diarization pass writes via `replace_diarization_results`.
+    async fn seed_two_speaker_meeting(pool: &SqlitePool) -> String {
+        let meeting_id = TranscriptsRepository::save_transcript(
+            pool,
+            "Test meeting",
+            &[segment("first", 0.0, 5.0), segment("second", 5.0, 10.0)],
+            None,
+        )
+        .await
+        .unwrap();
+        let id1 = id_for_text(pool, &meeting_id, "first").await;
+        let id2 = id_for_text(pool, &meeting_id, "second").await;
+
+        SpeakerRepository::replace_diarization_results(
+            pool,
+            &meeting_id,
+            &[
+                ChunkAttribution { chunk_id: id1, speaker: Some("speaker_00".to_string()), uncertain: false },
+                ChunkAttribution { chunk_id: id2, speaker: Some("speaker_01".to_string()), uncertain: false },
+            ],
+            &[
+                SpeakerName { label: "speaker_00".to_string(), name: "Speaker 1".to_string() },
+                SpeakerName { label: "speaker_01".to_string(), name: "Speaker 2".to_string() },
+            ],
+        )
+        .await
+        .unwrap();
+
+        meeting_id
+    }
+
+    #[tokio::test]
+    async fn rename_speaker_overwrites_only_that_speakers_name() {
+        let pool = migrated_pool().await;
+        let meeting_id = seed_two_speaker_meeting(&pool).await;
+
+        let updated =
+            SpeakerRepository::rename_speaker(&pool, &meeting_id, "speaker_01", "Priya").await.unwrap();
+        assert_eq!(updated, 1);
+
+        let speakers = SpeakerRepository::get_meeting_speakers(&pool, &meeting_id).await.unwrap();
+        assert_eq!(speakers[0].name, "Speaker 1");
+        assert_eq!(speakers[1].name, "Priya");
+    }
+
+    #[tokio::test]
+    async fn rename_speaker_is_scoped_to_one_meeting() {
+        let pool = migrated_pool().await;
+        let meeting_a = seed_two_speaker_meeting(&pool).await;
+        let meeting_b = seed_two_speaker_meeting(&pool).await;
+
+        SpeakerRepository::rename_speaker(&pool, &meeting_a, "speaker_00", "Alice").await.unwrap();
+
+        // The same label in the other meeting is a different row and must be untouched.
+        let speakers_b = SpeakerRepository::get_meeting_speakers(&pool, &meeting_b).await.unwrap();
+        assert_eq!(speakers_b[0].name, "Speaker 1");
+    }
+
+    #[tokio::test]
+    async fn rename_speaker_for_an_unknown_label_updates_nothing() {
+        let pool = migrated_pool().await;
+        let meeting_id = seed_two_speaker_meeting(&pool).await;
+
+        let updated =
+            SpeakerRepository::rename_speaker(&pool, &meeting_id, "speaker_99", "Nobody").await.unwrap();
+        assert_eq!(updated, 0);
+
+        let speakers = SpeakerRepository::get_meeting_speakers(&pool, &meeting_id).await.unwrap();
+        assert_eq!(speakers.len(), 2);
+        assert_eq!(speakers[1].name, "Speaker 2");
+    }
+
+    #[tokio::test]
+    async fn re_running_diarization_discards_a_renamed_speaker() {
+        let pool = migrated_pool().await;
+        let meeting_id = seed_two_speaker_meeting(&pool).await;
+        SpeakerRepository::rename_speaker(&pool, &meeting_id, "speaker_00", "Alice").await.unwrap();
+
+        // A fresh pass rebuilds the mapping with default names (ADR-0001: clustering is not
+        // stable across runs, so user-assigned names are dropped rather than remapped).
+        let id1 = id_for_text(&pool, &meeting_id, "first").await;
+        SpeakerRepository::replace_diarization_results(
+            &pool,
+            &meeting_id,
+            &[ChunkAttribution { chunk_id: id1, speaker: Some("speaker_00".to_string()), uncertain: false }],
+            &[SpeakerName { label: "speaker_00".to_string(), name: "Speaker 1".to_string() }],
+        )
+        .await
+        .unwrap();
 
         let speakers = SpeakerRepository::get_meeting_speakers(&pool, &meeting_id).await.unwrap();
         assert_eq!(speakers.len(), 1);

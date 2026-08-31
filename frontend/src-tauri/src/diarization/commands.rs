@@ -266,6 +266,45 @@ pub async fn run_diarization_command(
     })
 }
 
+/// Renames one discovered speaker for one meeting. The new name is trimmed; an empty or
+/// whitespace-only name is rejected. The rename applies to the whole meeting at once -
+/// every transcript row resolves its speaker through this one label -> name mapping - and
+/// is scoped to this meeting only (see docs/adr/0001, docs/adr/0004).
+///
+/// Errors if the label is no longer part of the meeting: a re-run of speaker detection
+/// discards and rebuilds the labels (ADR-0001), so a rename attempted from a stale, still-
+/// open transcript view must fail loudly rather than silently do nothing.
+#[command]
+pub async fn rename_meeting_speaker(
+    state: tauri::State<'_, AppState>,
+    meeting_id: String,
+    speaker_label: String,
+    name: String,
+) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Speaker name can't be empty".to_string());
+    }
+
+    let updated = SpeakerRepository::rename_speaker(
+        state.db_manager.pool(),
+        &meeting_id,
+        &speaker_label,
+        trimmed,
+    )
+    .await
+    .map_err(|e| format!("Failed to rename speaker: {}", e))?;
+
+    if updated == 0 {
+        return Err(
+            "That speaker is no longer part of this meeting - a new detection run may have replaced it."
+                .to_string(),
+        );
+    }
+
+    Ok(())
+}
+
 /// The meeting's discovered speakers and their display names. Empty until a diarization
 /// pass has completed for this meeting.
 #[command]

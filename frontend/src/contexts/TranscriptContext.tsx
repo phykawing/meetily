@@ -456,7 +456,10 @@ export function TranscriptProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  // Copy transcript to clipboard with recording-relative timestamps
+  // Copy transcript to clipboard with recording-relative timestamps.
+  // No speaker attribution here: this is the live-recording panel, and diarization is a
+  // post-meeting pass (docs/adr/0001), so no Speaker names exist yet. The meeting-details
+  // export (useCopyOperations) is the one that carries assigned names - phykawing/meetily#17.
   const copyTranscript = useCallback(() => {
     // Format timestamps as recording-relative [MM:SS] instead of wall-clock time
     const formatTime = (seconds: number | undefined): string => {

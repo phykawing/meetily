@@ -600,6 +600,7 @@ pub fn run() {
             diarization::commands::download_diarization_models,
             diarization::commands::run_diarization_command,
             diarization::commands::get_meeting_speakers,
+            diarization::commands::rename_meeting_speaker,
             // Parallel processing commands
             whisper_engine::parallel_commands::initialize_parallel_processor,
             whisper_engine::parallel_commands::start_parallel_processing,

@@ -10,6 +10,7 @@ import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Loader2 } from 'lucide-react';
+import { fetchSpeakerNames } from '@/lib/meeting-speakers';
 
 type WrittenForm = 'colloquial' | 'written';
 
@@ -85,8 +86,7 @@ export function TranscriptPanel({
       return;
     }
     try {
-      const speakers = await invoke<{ label: string; name: string }[]>('get_meeting_speakers', { meetingId });
-      setSpeakerNames(Object.fromEntries(speakers.map((s) => [s.label, s.name])));
+      setSpeakerNames(await fetchSpeakerNames(meetingId));
     } catch (error) {
       console.error('Failed to load meeting speakers:', error);
     }
@@ -95,6 +95,27 @@ export function TranscriptPanel({
   useEffect(() => {
     refreshSpeakerNames();
   }, [refreshSpeakerNames]);
+
+  // Rename a discovered speaker (phykawing/meetily#17). Optimistically updates the local
+  // label -> name map so every segment of that speaker relabels at once, then persists;
+  // on failure it reloads the authoritative names from the database. The rename is scoped
+  // to this meeting - the backend command keys on (meeting_id, speaker_label).
+  const handleRenameSpeaker = useCallback(
+    async (label: string, name: string) => {
+      if (!meetingId) return;
+      setSpeakerNames((current) => ({ ...current, [label]: name }));
+      try {
+        await invoke('rename_meeting_speaker', { meetingId, speakerLabel: label, name });
+        toast.success(`Speaker renamed to "${name}"`);
+      } catch (error) {
+        toast.error('Could not rename speaker', {
+          description: error instanceof Error ? error.message : String(error),
+        });
+        await refreshSpeakerNames();
+      }
+    },
+    [meetingId, refreshSpeakerNames]
+  );
 
   useEffect(() => {
     const unlisten = listen<{ meeting_id: string }>('diarization-complete', (event) => {
@@ -312,6 +333,7 @@ export function TranscriptPanel({
             loadedCount={loadedCount}
             onLoadMore={onLoadMore}
             speakerNames={speakerNames}
+            onRenameSpeaker={handleRenameSpeaker}
           />
         )}
       </div>
