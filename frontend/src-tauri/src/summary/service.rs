@@ -1,5 +1,6 @@
 use crate::database::repositories::{
-    meeting::MeetingsRepository, setting::SettingsRepository, summary::SummaryProcessesRepository,
+    meeting::MeetingsRepository, setting::SettingsRepository, speaker::SpeakerRepository,
+    summary::SummaryProcessesRepository,
 };
 use crate::summary::llm_client::LLMProvider;
 use crate::summary::language_detection::resolve_summary_language;
@@ -561,6 +562,26 @@ impl SummaryService {
             }),
         };
 
+        // Speaker-aware summarisation (phykawing/meetily#20). The flag comes from the
+        // meeting's discovered speakers in the DB, not from sniffing `text` for `**Name:**`
+        // headers: the frontend builds `text` with those headers only when a diarization
+        // pass has run, and `meeting_speakers` is the same signal without the false
+        // positives a user's own transcript wording could trigger. An empty list — an
+        // undiarized meeting, or a lookup failure — keeps the prompt speaker-blind, exactly
+        // as before this feature.
+        let speaker_attributed = match SpeakerRepository::get_meeting_speakers(&pool, &meeting_id)
+            .await
+        {
+            Ok(speakers) => !speakers.is_empty(),
+            Err(e) => {
+                warn!(
+                    "Failed to load meeting speakers for summary attribution (meeting_id={}): {}. Summarising speaker-blind.",
+                    meeting_id, e
+                );
+                false
+            }
+        };
+
         let client = reqwest::Client::new();
         let result = generate_meeting_summary(
             &client,
@@ -568,6 +589,7 @@ impl SummaryService {
             &model_name,
             &final_api_key,
             &text,
+            speaker_attributed,
             &custom_prompt,
             &template_id,
             &template,

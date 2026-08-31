@@ -15,6 +15,22 @@ static THINKING_TAG_REGEX: Lazy<Regex> = Lazy::new(|| {
 const ENGLISH_BASE_SUMMARY_INSTRUCTION: &str =
     "**Write the summary/report in English regardless of transcript language; non-English prose is invalid.**";
 
+// Speaker-aware summarisation (phykawing/meetily#20). When a meeting has been diarized, the
+// transcript handed to summarisation groups lines into Speaker Turns headed by `**Name:**`
+// (see `frontend/src/lib/speaker-turns.ts`). These instructions tell the model to carry
+// that attribution through to decisions and action-item owners. They are injected only when
+// the meeting actually has discovered speakers, so an undiarized meeting's prompt is
+// byte-for-byte what it was before this feature existed (issue #20, acceptance criterion 4).
+// The wording never asserts that headers are present — only what to do where the source
+// makes an owner clear — so a pass that found speakers but attributed no chunk stays
+// harmless.
+const SPEAKER_ATTRIBUTION_CHUNK_INSTRUCTION: &str =
+    "The transcript groups lines into speaker turns headed by `**Name:**`. Record who raised, decided, or committed to each point, naming the speaker, wherever the transcript makes it clear.";
+const SPEAKER_ATTRIBUTION_COMBINE_INSTRUCTION: &str =
+    "Preserve every speaker attribution from the input summaries; do not drop who committed to what.";
+const SPEAKER_ATTRIBUTION_FINAL_INSTRUCTION: &str =
+    "The source text attributes statements to named speakers. Attribute decisions and action-item owners to those names only where the source makes the owner clear; never guess an owner, and leave it unattributed otherwise.";
+
 fn resolve_cached_english<'a>(
     cached: Option<&'a str>,
     summary_language: Option<&str>,
@@ -134,22 +150,38 @@ fn translation_system_prompt(target_language: &str) -> String {
     )
 }
 
-fn build_chunk_summary_user_prompt(chunk: &str) -> String {
+fn build_chunk_summary_user_prompt(chunk: &str, speaker_attributed: bool) -> String {
+    let speaker_line = if speaker_attributed {
+        format!("\n\n{SPEAKER_ATTRIBUTION_CHUNK_INSTRUCTION}")
+    } else {
+        String::new()
+    };
     format!(
-        "{ENGLISH_BASE_SUMMARY_INSTRUCTION}\n\nProvide a concise but comprehensive summary of the following transcript chunk. Capture all key points, decisions, action items, and mentioned individuals.\n\n<transcript_chunk>\n{chunk}\n</transcript_chunk>"
+        "{ENGLISH_BASE_SUMMARY_INSTRUCTION}{speaker_line}\n\nProvide a concise but comprehensive summary of the following transcript chunk. Capture all key points, decisions, action items, and mentioned individuals.\n\n<transcript_chunk>\n{chunk}\n</transcript_chunk>"
     )
 }
 
-fn build_combine_summary_user_prompt(combined_text: &str) -> String {
+fn build_combine_summary_user_prompt(combined_text: &str, speaker_attributed: bool) -> String {
+    let speaker_line = if speaker_attributed {
+        format!("\n\n{SPEAKER_ATTRIBUTION_COMBINE_INSTRUCTION}")
+    } else {
+        String::new()
+    };
     format!(
-        "{ENGLISH_BASE_SUMMARY_INSTRUCTION}\n\nThe following are consecutive summaries of a meeting. Combine them into a single, coherent, and detailed narrative summary that retains all important details, organized logically.\n\n<summaries>\n{combined_text}\n</summaries>"
+        "{ENGLISH_BASE_SUMMARY_INSTRUCTION}{speaker_line}\n\nThe following are consecutive summaries of a meeting. Combine them into a single, coherent, and detailed narrative summary that retains all important details, organized logically.\n\n<summaries>\n{combined_text}\n</summaries>"
     )
 }
 
 fn build_final_report_system_prompt(
     section_instructions: &str,
     clean_template_markdown: &str,
+    speaker_attributed: bool,
 ) -> String {
+    let speaker_rule = if speaker_attributed {
+        format!("\n8. {SPEAKER_ATTRIBUTION_FINAL_INSTRUCTION}")
+    } else {
+        String::new()
+    };
     format!(
         r#"You are an expert meeting summarizer. Generate a final meeting report by filling in the provided Markdown template based on the source text.
 
@@ -160,7 +192,7 @@ fn build_final_report_system_prompt(
 4. Fill each template section per its instructions.
 5. If a section has no relevant info, write "None noted in this section."
 6. Output **only** the completed Markdown report.
-7. If unsure about something, omit it.
+7. If unsure about something, omit it.{speaker_rule}
 
 **SECTION-SPECIFIC INSTRUCTIONS:**
 {section_instructions}
@@ -302,6 +334,10 @@ pub fn extract_meeting_name_from_markdown(markdown: &str) -> Option<String> {
 /// * `model_name` - Specific model name
 /// * `api_key` - API key for the provider
 /// * `text` - Full transcript text to summarize
+/// * `speaker_attributed` - Whether the meeting has been diarized (has discovered
+///   speakers), so `text` groups lines into `**Name:**` speaker turns and the prompt
+///   should ask the model to attribute decisions and action-item owners. `false` keeps
+///   the prompt byte-identical to the pre-diarization format (issue #20).
 /// * `custom_prompt` - Optional user-provided context
 /// * `template_id` - Template identifier (e.g., "daily_standup", "standard_meeting")
 /// * `token_threshold` - Token limit for single-pass processing (default 4000)
@@ -326,6 +362,7 @@ pub async fn generate_meeting_summary(
     model_name: &str,
     api_key: &str,
     text: &str,
+    speaker_attributed: bool,
     custom_prompt: &str,
     template_id: &str,
     template: &Template,
@@ -397,7 +434,7 @@ pub async fn generate_meeting_summary(
                 }
 
                 info!("Processing chunk {}/{}", i + 1, num_chunks);
-                let user_prompt_chunk = build_chunk_summary_user_prompt(chunk);
+                let user_prompt_chunk = build_chunk_summary_user_prompt(chunk, speaker_attributed);
 
                 match generate_summary(
                     client,
@@ -451,7 +488,8 @@ pub async fn generate_meeting_summary(
                 );
                 let combined_text = chunk_summaries.join("\n---\n");
                 let system_prompt_combine = "You are an expert at synthesizing meeting summaries.";
-                let user_prompt_combine = build_combine_summary_user_prompt(&combined_text);
+                let user_prompt_combine =
+                    build_combine_summary_user_prompt(&combined_text, speaker_attributed);
                 generate_summary(
                     client,
                     provider,
@@ -479,8 +517,11 @@ pub async fn generate_meeting_summary(
         let clean_template_markdown = template.to_markdown_structure();
         let section_instructions = template.to_section_instructions();
 
-        let final_system_prompt =
-            build_final_report_system_prompt(&section_instructions, &clean_template_markdown);
+        let final_system_prompt = build_final_report_system_prompt(
+            &section_instructions,
+            &clean_template_markdown,
+            speaker_attributed,
+        );
 
         let mut final_user_prompt = format!(
             "<transcript_chunks>\n{content_to_summarize}\n</transcript_chunks>\n"
@@ -711,7 +752,7 @@ mod tests {
 
     #[test]
     fn chunk_summary_prompt_forces_english_base_output() {
-        let prompt = build_chunk_summary_user_prompt("会議の内容");
+        let prompt = build_chunk_summary_user_prompt("会議の内容", false);
 
         assert!(prompt.contains(ENGLISH_BASE_SUMMARY_INSTRUCTION));
         assert!(prompt.contains("<transcript_chunk>"));
@@ -719,7 +760,7 @@ mod tests {
 
     #[test]
     fn combine_summary_prompt_forces_english_base_output() {
-        let prompt = build_combine_summary_user_prompt("chunk one\n---\nchunk two");
+        let prompt = build_combine_summary_user_prompt("chunk one\n---\nchunk two", false);
 
         assert!(prompt.contains(ENGLISH_BASE_SUMMARY_INSTRUCTION));
         assert!(prompt.contains("<summaries>"));
@@ -727,10 +768,64 @@ mod tests {
 
     #[test]
     fn final_report_prompt_forces_english_base_output() {
-        let prompt = build_final_report_system_prompt("Fill the section", "# <Add Title here>");
+        let prompt =
+            build_final_report_system_prompt("Fill the section", "# <Add Title here>", false);
 
         assert!(prompt.contains(ENGLISH_BASE_SUMMARY_INSTRUCTION));
         assert!(prompt.contains("SECTION-SPECIFIC INSTRUCTIONS"));
+    }
+
+    // Speaker-aware summarisation (issue #20) --------------------------------
+    //
+    // The undiarized path must stay exactly as it was; the diarized path must carry an
+    // instruction that tells the model to attribute owners. We assert presence/absence of
+    // the marker rather than freezing the whole prompt.
+
+    #[test]
+    fn undiarized_prompts_carry_no_speaker_attribution_instruction() {
+        let chunk = build_chunk_summary_user_prompt("hello", false);
+        let combine = build_combine_summary_user_prompt("a\n---\nb", false);
+        let final_report = build_final_report_system_prompt("Fill it", "# <Title>", false);
+
+        assert!(!chunk.contains(SPEAKER_ATTRIBUTION_CHUNK_INSTRUCTION));
+        assert!(!combine.contains(SPEAKER_ATTRIBUTION_COMBINE_INSTRUCTION));
+        assert!(!final_report.contains(SPEAKER_ATTRIBUTION_FINAL_INSTRUCTION));
+        // The critical-instruction list is untouched — still ends at rule 7.
+        assert!(final_report.contains("7. If unsure about something, omit it.\n\n**SECTION"));
+    }
+
+    #[test]
+    fn diarized_chunk_prompt_asks_to_name_who_committed() {
+        let prompt = build_chunk_summary_user_prompt("**Alice:**\n[00:01] I'll own the rollout", true);
+
+        assert!(prompt.contains(SPEAKER_ATTRIBUTION_CHUNK_INSTRUCTION));
+        assert!(prompt.contains(ENGLISH_BASE_SUMMARY_INSTRUCTION));
+        assert!(prompt.contains("<transcript_chunk>"));
+    }
+
+    #[test]
+    fn diarized_combine_prompt_asks_to_preserve_attribution() {
+        let prompt = build_combine_summary_user_prompt("summary one\n---\nsummary two", true);
+
+        assert!(prompt.contains(SPEAKER_ATTRIBUTION_COMBINE_INSTRUCTION));
+        assert!(prompt.contains(ENGLISH_BASE_SUMMARY_INSTRUCTION));
+    }
+
+    #[test]
+    fn diarized_final_report_prompt_asks_to_attribute_owners() {
+        let prompt = build_final_report_system_prompt("Fill it", "# <Title>", true);
+
+        assert!(prompt.contains(SPEAKER_ATTRIBUTION_FINAL_INSTRUCTION));
+        // Added as a numbered critical instruction, after the existing rule 7.
+        assert!(prompt.contains("7. If unsure about something, omit it.\n8. "));
+        assert!(prompt.contains("SECTION-SPECIFIC INSTRUCTIONS"));
+    }
+
+    #[test]
+    fn speaker_attribution_final_instruction_forbids_guessing_owners() {
+        // Keeps it consistent with critical rules 2 and 7 (no inference, omit when unsure).
+        assert!(SPEAKER_ATTRIBUTION_FINAL_INSTRUCTION.contains("never guess"));
+        assert!(SPEAKER_ATTRIBUTION_FINAL_INSTRUCTION.contains("where the source makes the owner clear"));
     }
 
     #[test]
