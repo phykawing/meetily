@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
 import { isOllamaNotInstalledError } from '@/lib/utils';
 import { BuiltInModelInfo } from '@/lib/builtin-ai';
+import { buildSummaryTranscriptPayload as buildSummaryPayload } from '@/lib/summary-transcript-payload';
 import {
   detectAndCacheSummaryLanguage,
   readMeetingSummaryLanguage,
@@ -443,24 +444,25 @@ export function useSummaryGeneration({
     }
   }, []);
 
-  const buildSummaryTranscriptPayload = useCallback((allTranscripts: Transcript[]) => {
-    const formatTime = (seconds: number | undefined, fallbackTimestamp: string): string => {
-      if (seconds === undefined) {
-        return fallbackTimestamp;
-      }
-      const totalSecs = Math.floor(seconds);
-      const mins = Math.floor(totalSecs / 60);
-      const secs = totalSecs % 60;
-      return `[${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}]`;
-    };
-
-    return {
-      transcriptText: allTranscripts
-        .map(t => `${formatTime(t.audio_start_time, t.timestamp)} ${t.text}`)
-        .join('\n'),
-      transcriptTexts: allTranscripts.map(t => t.text),
-    };
-  }, []);
+  // Builds the summary prompt, resolving each diarized Speaker Turn to its assigned name so
+  // the summary can attribute action items to a person (phykawing/meetily#18). A meeting
+  // that was never diarized resolves to an empty map and the prompt is byte-identical to
+  // the pre-diarization format.
+  const buildSummaryTranscriptPayload = useCallback(async (allTranscripts: Transcript[]) => {
+    let speakerNames: Record<string, string> = {};
+    try {
+      const speakers = await invokeTauri<{ label: string; name: string }[]>('get_meeting_speakers', {
+        meetingId: meeting.id,
+      });
+      speakerNames = Object.fromEntries(speakers.map((s) => [s.label, s.name]));
+    } catch (error) {
+      // An undiarized meeting still returns an empty list; a genuine failure here only
+      // means the summary is built speaker-blind, exactly as before this feature existed -
+      // not worth blocking generation over.
+      console.warn('Failed to load meeting speakers for summary attribution:', error);
+    }
+    return buildSummaryPayload(allTranscripts, speakerNames);
+  }, [meeting.id]);
 
   // Public API: Generate summary from transcripts
   const handleGenerateSummary = useCallback(async (customPrompt: string = '') => {
@@ -618,7 +620,7 @@ export function useSummaryGeneration({
       }
     }
 
-    const summaryPayload = buildSummaryTranscriptPayload(allTranscripts);
+    const summaryPayload = await buildSummaryTranscriptPayload(allTranscripts);
 
     await processSummary({
       ...summaryPayload,
@@ -637,7 +639,7 @@ export function useSummaryGeneration({
     }
 
     await processSummary({
-      ...buildSummaryTranscriptPayload(allTranscripts),
+      ...(await buildSummaryTranscriptPayload(allTranscripts)),
       isRegeneration: true
     });
   }, [meeting.id, fetchAllTranscripts, buildSummaryTranscriptPayload, processSummary]);

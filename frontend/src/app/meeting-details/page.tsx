@@ -9,6 +9,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { LoaderIcon } from "lucide-react";
 import { useConfig } from "@/contexts/ConfigContext";
 import { usePaginatedTranscripts } from "@/hooks/usePaginatedTranscripts";
+import { useAutoDiarization } from "@/hooks/meeting-details/useAutoDiarization";
 
 interface MeetingDetailsResponse {
   id: string;
@@ -47,6 +48,16 @@ function MeetingDetailsContent() {
     refetch,
     error: transcriptError,
   } = usePaginatedTranscripts({ meetingId: meetingId || '' });
+
+  // When the user arrives straight from recording, kick off the speaker-detection pass
+  // automatically (phykawing/meetily#18) - independent of the auto-summary toggle. While
+  // the pass is deciding-to-run or running, `blocksAutoSummary` holds the automatic
+  // summary back so its prompt can carry speaker labels.
+  const autoDiarization = useAutoDiarization({
+    meetingId,
+    meetingFolderPath: metadata?.folder_path,
+    enabled: source === 'recording',
+  });
 
   // Check if gemma3:1b model is available in Ollama
   const checkForGemmaModel = useCallback(async (): Promise<boolean> => {
@@ -362,6 +373,7 @@ function MeetingDetailsContent() {
     meeting={meetingDetails}
     summaryData={meetingSummary}
     shouldAutoGenerate={shouldAutoGenerate}
+    waitForDiarization={autoDiarization.blocksAutoSummary}
     onAutoGenerateComplete={() => setShouldAutoGenerate(false)}
     onMeetingUpdated={async () => {
       // Refetch meeting details to get updated title from backend

@@ -22,6 +22,7 @@ export default function PageContent({
   meeting,
   summaryData,
   shouldAutoGenerate = false,
+  waitForDiarization = false,
   onAutoGenerateComplete,
   onMeetingUpdated,
   onRefetchTranscripts,
@@ -36,6 +37,9 @@ export default function PageContent({
   meeting: any;
   summaryData: Summary | null;
   shouldAutoGenerate?: boolean;
+  // While true, the automatic summary is held back so the post-recording speaker-detection
+  // pass can finish and its labels can go into the summary prompt (phykawing/meetily#18).
+  waitForDiarization?: boolean;
   onAutoGenerateComplete?: () => void;
   onMeetingUpdated?: () => Promise<void>;
   onRefetchTranscripts?: () => Promise<void>;
@@ -144,6 +148,14 @@ export default function PageContent({
     let cancelled = false;
 
     const autoGenerate = async () => {
+      // Hold off while the post-recording speaker-detection pass is still deciding-to-run
+      // or running: once it settles, `waitForDiarization` flips false and this effect
+      // re-runs, now with speaker labels available for the prompt (phykawing/meetily#18).
+      if (waitForDiarization) {
+        console.log('🕰️ Auto-summary waiting for speaker detection to finish...');
+        return;
+      }
+
       if (shouldAutoGenerate && meetingData.transcripts.length > 0 && !cancelled) {
         console.log(`🤖 Auto-generating summary with ${modelConfig.provider}/${modelConfig.model}...`);
         await summaryGeneration.handleGenerateSummary('');
@@ -161,7 +173,7 @@ export default function PageContent({
     return () => {
       cancelled = true;
     };
-  }, [shouldAutoGenerate, meeting.id]); // Re-run if meeting changes
+  }, [shouldAutoGenerate, waitForDiarization, meeting.id]); // Re-run if meeting changes or the diarization gate opens
 
   return (
     <motion.div

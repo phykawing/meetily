@@ -57,6 +57,21 @@ export function SpeakerDetectionButton({ meetingId, meetingFolderPath, onComplet
       .catch((error) => {
         console.error('Failed to load diarization model status:', error);
       });
+    // A pass may already be running for this meeting when the button mounts - most often
+    // the automatic post-recording one (phykawing/meetily#18), which this button did not
+    // start. Reflect that so it shows as busy rather than offering a click that just
+    // errors. A pass running for a *different* meeting is ignored - that meeting's own
+    // button reflects it, and the progress listener below still filters by meeting_id.
+    invoke<string | null>('diarization_running_meeting')
+      .then((runningMeetingId) => {
+        if (!cancelled && runningMeetingId === meetingId) {
+          setIsRunning(true);
+          setProgressMessage('Detecting...');
+        }
+      })
+      .catch((error) => {
+        console.error('Failed to check diarization running state:', error);
+      });
     return () => {
       cancelled = true;
     };
@@ -71,6 +86,9 @@ export function SpeakerDetectionButton({ meetingId, meetingFolderPath, onComplet
     const unlistenPromises = [
       listen<DiarizationProgress>('diarization-progress', (event) => {
         if (event.payload.meeting_id === meetingId) {
+          // Covers a pass this button did not start (the automatic post-recording one):
+          // the first progress event is enough to switch it into the running state.
+          setIsRunning(true);
           setProgressMessage(event.payload.message);
         }
       }),

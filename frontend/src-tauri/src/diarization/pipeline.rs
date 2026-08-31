@@ -28,6 +28,7 @@ use sherpa_onnx::{
 use sqlx::SqlitePool;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Runtime};
 
 /// Global flag guarding against two overlapping diarization passes. Diarization is
@@ -35,28 +36,41 @@ use tauri::{AppHandle, Emitter, Runtime};
 /// sharing one flag process-wide (like `audio::retranscription`'s guard) is simplest.
 static DIARIZATION_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
+/// The `meeting_id` of the pass that currently holds `DIARIZATION_IN_PROGRESS`, so a
+/// caller can tell "a pass is running for *this* meeting" from "a pass is running for a
+/// different meeting" - the two need opposite handling in the UI (phykawing/meetily#18).
+/// Set and cleared together with the flag by `DiarizationGuard`.
+static DIARIZATION_MEETING_ID: Mutex<Option<String>> = Mutex::new(None);
+
 struct DiarizationGuard;
 
 impl DiarizationGuard {
-    fn acquire() -> Result<Self, String> {
+    fn acquire(meeting_id: &str) -> Result<Self, String> {
         if DIARIZATION_IN_PROGRESS
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_err()
         {
             return Err("Diarization already in progress".to_string());
         }
+        *DIARIZATION_MEETING_ID.lock().unwrap() = Some(meeting_id.to_string());
         Ok(DiarizationGuard)
     }
 }
 
 impl Drop for DiarizationGuard {
     fn drop(&mut self) {
+        *DIARIZATION_MEETING_ID.lock().unwrap() = None;
         DIARIZATION_IN_PROGRESS.store(false, Ordering::SeqCst);
     }
 }
 
 pub fn is_diarization_in_progress() -> bool {
     DIARIZATION_IN_PROGRESS.load(Ordering::SeqCst)
+}
+
+/// The `meeting_id` of the diarization pass running right now, or `None` if none is.
+pub fn diarization_in_progress_meeting() -> Option<String> {
+    DIARIZATION_MEETING_ID.lock().unwrap().clone()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,7 +168,7 @@ async fn run_diarization_guarded<R: Runtime>(
     meeting_folder_path: String,
     base_models_dir: PathBuf,
 ) -> Result<DiarizationResult> {
-    let _guard = DiarizationGuard::acquire().map_err(|e| anyhow!(e))?;
+    let _guard = DiarizationGuard::acquire(meeting_id).map_err(|e| anyhow!(e))?;
     run_diarization_inner(app, &pool, meeting_id, &meeting_folder_path, &base_models_dir).await
 }
 

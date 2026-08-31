@@ -305,6 +305,16 @@ pub async fn rename_meeting_speaker(
     Ok(())
 }
 
+/// The `meeting_id` of the diarization pass running right now, or `null` if none is (the
+/// pass is single-flight process-wide, see `diarization::pipeline`). The transcript panel's
+/// Speakers button polls this on mount so it shows the running state for a pass started
+/// elsewhere - e.g. the automatic post-recording pass (phykawing/meetily#18) - and can
+/// tell that pass apart from one running for a *different* meeting.
+#[command]
+pub fn diarization_running_meeting() -> Option<String> {
+    pipeline::diarization_in_progress_meeting()
+}
+
 /// The meeting's discovered speakers and their display names. Empty until a diarization
 /// pass has completed for this meeting.
 #[command]

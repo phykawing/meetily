@@ -599,6 +599,7 @@ pub fn run() {
             diarization::commands::diarization_model_status,
             diarization::commands::download_diarization_models,
             diarization::commands::run_diarization_command,
+            diarization::commands::diarization_running_meeting,
             diarization::commands::get_meeting_speakers,
             diarization::commands::rename_meeting_speaker,
             // Parallel processing commands
