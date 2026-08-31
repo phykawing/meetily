@@ -56,6 +56,7 @@ function MeetingDetailsContent() {
   const autoDiarization = useAutoDiarization({
     meetingId,
     meetingFolderPath: metadata?.folder_path,
+    metadataLoaded: !!metadata,
     enabled: source === 'recording',
   });
 

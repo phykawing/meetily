@@ -48,10 +48,14 @@ const started = new Set<string>();
 export function useAutoDiarization({
   meetingId,
   meetingFolderPath,
+  metadataLoaded,
   enabled,
 }: {
   meetingId: string | null;
   meetingFolderPath: string | null | undefined;
+  // Whether the meeting's metadata has finished loading. Lets the hook tell "folder path
+  // not here yet" (keep waiting) from "this meeting has no saved audio" (give up).
+  metadataLoaded: boolean;
   enabled: boolean;
 }): { phase: AutoDiarizationPhase; blocksAutoSummary: boolean } {
   // Start already blocking when this arrived from recording, so the automatic summary
@@ -88,10 +92,16 @@ export function useAutoDiarization({
       );
       if (cancelled) return;
 
-      // The meeting is still loading (no id or no saved-audio folder yet). Stay in
-      // 'checking' - which keeps blocking - and let the effect re-run when they arrive,
-      // rather than briefly unblocking and letting the summary slip through.
-      if (!meetingId || !meetingFolderPath) {
+      // Still loading - no id, or metadata not back yet. Stay in 'checking' (keeps
+      // blocking) and let the effect re-run when it arrives, rather than briefly
+      // unblocking and letting the summary slip through.
+      if (!meetingId || !metadataLoaded) {
+        return;
+      }
+      // Metadata is loaded and there is still no folder path: this meeting has no saved
+      // audio to diarize. Nothing to wait on - let the summary through.
+      if (!meetingFolderPath) {
+        set('inactive');
         return;
       }
 
@@ -158,7 +168,7 @@ export function useAutoDiarization({
       clearTimeout(backstop);
       unlisteners.forEach((unlisten) => unlisten());
     };
-  }, [enabled, meetingId, meetingFolderPath]);
+  }, [enabled, meetingId, meetingFolderPath, metadataLoaded]);
 
   return {
     phase,
