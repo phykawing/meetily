@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Users, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
+import { SpeakerDetectionDialog } from './SpeakerDetectionDialog';
 
 interface SpeakerDetectionButtonProps {
   meetingId: string;
@@ -47,6 +48,7 @@ export function SpeakerDetectionButton({ meetingId, meetingFolderPath, onComplet
   const [ready, setReady] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [progressMessage, setProgressMessage] = useState<string | null>(null);
+  const [dialogOpen, setDialogOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -120,37 +122,54 @@ export function SpeakerDetectionButton({ meetingId, meetingFolderPath, onComplet
     };
   }, [meetingId]);
 
-  const handleClick = useCallback(async () => {
+  const handleClick = useCallback(() => {
     Analytics.trackButtonClick('detect_speakers', 'meeting_details');
+    // Always confirm through the dialog: it carries the optional expected-count hint and,
+    // when this meeting already has speakers, the warning that a re-run discards their
+    // assigned names (phykawing/meetily#19).
+    setDialogOpen(true);
+  }, []);
 
-    setIsRunning(true);
-    setProgressMessage('Starting...');
-    try {
-      // The command itself is the authoritative gate (re-checks consent + model
-      // readiness), so this always attempts the call rather than trusting the `ready`
-      // state fetched at mount, which could be stale if the user granted consent in
-      // Settings without reloading this page.
-      await invoke('run_diarization_command', { meetingId, meetingFolderPath });
-    } catch (error) {
-      setIsRunning(false);
-      setProgressMessage(null);
-      toast.error('Could not start speaker detection', {
-        description: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }, [meetingId, meetingFolderPath]);
+  const handleConfirm = useCallback(
+    async (expectedSpeakers: number | null) => {
+      setIsRunning(true);
+      setProgressMessage('Starting...');
+      try {
+        // The command itself is the authoritative gate (re-checks consent + model
+        // readiness), so this always attempts the call rather than trusting the `ready`
+        // state fetched at mount, which could be stale if the user granted consent in
+        // Settings without reloading this page.
+        await invoke('run_diarization_command', { meetingId, meetingFolderPath, expectedSpeakers });
+      } catch (error) {
+        setIsRunning(false);
+        setProgressMessage(null);
+        toast.error('Could not start speaker detection', {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+    [meetingId, meetingFolderPath]
+  );
 
   return (
-    <Button
-      size="sm"
-      variant="outline"
-      className="xl:px-4"
-      onClick={handleClick}
-      disabled={isRunning}
-      title={ready ? 'Detect speakers in this recording' : 'Enable Speaker Detection under Settings > Preferences first'}
-    >
-      {isRunning ? <Loader2 className="xl:mr-2 animate-spin" size={18} /> : <Users className="xl:mr-2" size={18} />}
-      <span className="hidden lg:inline">{isRunning ? (progressMessage ?? 'Detecting...') : 'Speakers'}</span>
-    </Button>
+    <>
+      <Button
+        size="sm"
+        variant="outline"
+        className="xl:px-4"
+        onClick={handleClick}
+        disabled={isRunning}
+        title={ready ? 'Detect speakers in this recording' : 'Enable Speaker Detection under Settings > Preferences first'}
+      >
+        {isRunning ? <Loader2 className="xl:mr-2 animate-spin" size={18} /> : <Users className="xl:mr-2" size={18} />}
+        <span className="hidden lg:inline">{isRunning ? (progressMessage ?? 'Detecting...') : 'Speakers'}</span>
+      </Button>
+      <SpeakerDetectionDialog
+        open={dialogOpen}
+        onOpenChange={setDialogOpen}
+        meetingId={meetingId}
+        onConfirm={handleConfirm}
+      />
+    </>
   );
 }

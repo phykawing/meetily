@@ -209,12 +209,20 @@ pub struct MeetingSpeakerInfo {
 /// able to reach a diarization run by skipping past a declined/unanswered consent prompt
 /// (see docs/adr/0005, which blocked this issue on #10 specifically so it could consume
 /// that readiness check rather than reassemble it).
+///
+/// `expected_speakers` is the optional attendee-count hint (phykawing/meetily#19); it is
+/// passed through uninterpreted to `pipeline::num_clusters_for`, which is also where an
+/// implausible value is tolerated rather than rejected. Re-running is otherwise unchanged -
+/// `pipeline` already discards the previous run's speakers and user-assigned names
+/// wholesale (ADR-0001), so the "names are discarded on re-run" warning lives in the
+/// frontend, before this call.
 #[command]
 pub async fn run_diarization_command(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
     meeting_id: String,
     meeting_folder_path: String,
+    expected_speakers: Option<u32>,
 ) -> Result<DiarizationStarted, String> {
     if pipeline::is_diarization_in_progress() {
         return Err("Speaker detection is already running".to_string());
@@ -251,6 +259,7 @@ pub async fn run_diarization_command(
             meeting_id_for_task,
             meeting_folder_path,
             base_dir,
+            expected_speakers,
         )
         .await
         {

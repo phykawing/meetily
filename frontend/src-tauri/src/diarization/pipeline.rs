@@ -127,12 +127,16 @@ fn emit_progress<R: Runtime>(
 /// return `Err` before ever reaching the emit logic, and the UI (which is already showing
 /// a "detecting…" state after the earlier Ok) would wait forever for an event that never
 /// arrives.
+///
+/// `expected_speakers` is the optional attendee-count hint from issue #19; see
+/// `num_clusters_for` for how it is interpreted.
 pub async fn run_diarization<R: Runtime>(
     app: AppHandle<R>,
     pool: SqlitePool,
     meeting_id: String,
     meeting_folder_path: String,
     base_models_dir: PathBuf,
+    expected_speakers: Option<u32>,
 ) -> Result<DiarizationResult> {
     let result = run_diarization_guarded(
         &app,
@@ -140,6 +144,7 @@ pub async fn run_diarization<R: Runtime>(
         &meeting_id,
         meeting_folder_path,
         base_models_dir,
+        expected_speakers,
     )
     .await;
 
@@ -167,9 +172,18 @@ async fn run_diarization_guarded<R: Runtime>(
     meeting_id: &str,
     meeting_folder_path: String,
     base_models_dir: PathBuf,
+    expected_speakers: Option<u32>,
 ) -> Result<DiarizationResult> {
     let _guard = DiarizationGuard::acquire(meeting_id).map_err(|e| anyhow!(e))?;
-    run_diarization_inner(app, &pool, meeting_id, &meeting_folder_path, &base_models_dir).await
+    run_diarization_inner(
+        app,
+        &pool,
+        meeting_id,
+        &meeting_folder_path,
+        &base_models_dir,
+        expected_speakers,
+    )
+    .await
 }
 
 async fn run_diarization_inner<R: Runtime>(
@@ -178,6 +192,7 @@ async fn run_diarization_inner<R: Runtime>(
     meeting_id: &str,
     meeting_folder_path: &str,
     base_models_dir: &Path,
+    expected_speakers: Option<u32>,
 ) -> Result<DiarizationResult> {
     emit_progress(app, meeting_id, "locating", 5, "Locating meeting audio...");
     let folder_path = PathBuf::from(meeting_folder_path);
@@ -199,8 +214,15 @@ async fn run_diarization_inner<R: Runtime>(
     let segmentation_path = models_dir.join(SEGMENTATION_MODEL.filename);
     let embedding_path = models_dir.join(EMBEDDING_MODEL.filename);
 
+    let num_clusters = num_clusters_for(expected_speakers);
     let segments = tokio::task::spawn_blocking(move || {
-        run_sherpa_diarization(&segmentation_path, &embedding_path, &samples, CLUSTERING_THRESHOLD)
+        run_sherpa_diarization(
+            &segmentation_path,
+            &embedding_path,
+            &samples,
+            num_clusters,
+            CLUSTERING_THRESHOLD,
+        )
     })
     .await
     .map_err(|e| anyhow!("Diarization task panicked: {}", e))??;
@@ -273,16 +295,39 @@ fn default_speaker_names(turns: &[SpeakerTurn]) -> Vec<SpeakerName> {
 /// default (0.5) - see docs/adr/0007. At the default, a ~13-minute two/three-person
 /// recording over-segmented into 12 spurious speakers; 0.75 produced 3, a materially more
 /// plausible count for that same recording. Not user-configurable - see issue #3's Out of
-/// Scope ("no exposed sensitivity setting").
+/// Scope ("no exposed sensitivity setting"). Only consulted when the speaker count is being
+/// discovered (`num_clusters` = -1); an expected-count hint bypasses it (see `num_clusters_for`).
 const CLUSTERING_THRESHOLD: f32 = 0.75;
+
+/// Turns the optional expected-speaker hint (issue #19) into sherpa-onnx's `num_clusters`
+/// knob: `-1` means "discover the count, `CLUSTERING_THRESHOLD`-driven", a positive value
+/// pins clustering to exactly that many speakers.
+///
+/// Only `2..=100` pins. `None` and out-of-range values map to `-1` because the hint is
+/// never required and only ever a hint - a bad value degrades to auto-detection rather
+/// than erroring. `Some(1)` also maps to `-1`: auto-detection already collapses a
+/// single-voice meeting to one cluster (that is why the default is `-1`), so pinning
+/// `num_clusters = 1` would only exercise a distinct, unvalidated sherpa path to reach the
+/// same result. The hint is not persisted; a re-run may be given a different number.
+fn num_clusters_for(expected_speakers: Option<u32>) -> i32 {
+    match expected_speakers {
+        Some(n) if (2..=100).contains(&n) => n as i32,
+        _ => -1,
+    }
+}
 
 /// Runs segmentation + embedding + clustering over `samples` (16kHz mono f32, matching
 /// what the pyannote segmentation model expects) and returns turns sorted by start time.
 /// Synchronous and CPU-bound - callers run this inside `spawn_blocking`.
+///
+/// `num_clusters` is sherpa-onnx's speaker-count knob: `-1` discovers the count using
+/// `clustering_threshold`, a positive value pins it to exactly that many speakers (and the
+/// threshold is then unused). Derive it with `num_clusters_for`.
 fn run_sherpa_diarization(
     segmentation_path: &Path,
     embedding_path: &Path,
     samples: &[f32],
+    num_clusters: i32,
     clustering_threshold: f32,
 ) -> Result<Vec<OfflineSpeakerDiarizationSegment>> {
     let config = OfflineSpeakerDiarizationConfig {
@@ -301,10 +346,7 @@ fn run_sherpa_diarization(
             provider: Some("cpu".to_string()),
             ..Default::default()
         },
-        // num_clusters left at -1 (auto, threshold-driven): the number of speakers is
-        // discovered, not declared in advance. A meeting with one voice throughout
-        // naturally collapses to a single cluster rather than erroring.
-        clustering: FastClusteringConfig { num_clusters: -1, threshold: clustering_threshold },
+        clustering: FastClusteringConfig { num_clusters, threshold: clustering_threshold },
         ..Default::default()
     };
 
@@ -353,6 +395,32 @@ mod tests {
     #[test]
     fn default_speaker_names_for_no_turns_is_empty() {
         assert!(default_speaker_names(&[]).is_empty());
+    }
+
+    #[test]
+    fn num_clusters_for_no_hint_is_auto_detect() {
+        assert_eq!(num_clusters_for(None), -1);
+    }
+
+    #[test]
+    fn num_clusters_for_a_plausible_hint_pins_the_count() {
+        assert_eq!(num_clusters_for(Some(2)), 2);
+        assert_eq!(num_clusters_for(Some(3)), 3);
+        assert_eq!(num_clusters_for(Some(100)), 100);
+    }
+
+    #[test]
+    fn num_clusters_for_zero_or_one_falls_back_to_auto_detect() {
+        // 0 is nonsense; 1 is handled by auto-detection's natural single-cluster collapse
+        // rather than the unvalidated num_clusters = 1 path.
+        assert_eq!(num_clusters_for(Some(0)), -1);
+        assert_eq!(num_clusters_for(Some(1)), -1);
+    }
+
+    #[test]
+    fn num_clusters_for_an_implausible_hint_falls_back_to_auto_detect() {
+        assert_eq!(num_clusters_for(Some(101)), -1);
+        assert_eq!(num_clusters_for(Some(u32::MAX)), -1);
     }
 
     #[test]
