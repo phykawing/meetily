@@ -46,3 +46,11 @@ registered or recommended.
   without further engineering — it exercises the exact production decode path
   (`resolve_decoding` + `transcribe_audio_with_confidence`), not a standalone CLI, so future
   comparisons stay faithful to what the app actually does.
+- **Not exercised: meeting vocabulary.** The harness builds a bare engine and never calls
+  `set_vocabulary`, so all three arms ran seed-only initial prompts. The vocabulary feature
+  (stories 14–18) is covered by unit tests but was not tested on real audio, even though
+  the gate text asked for audio "containing the user's actual jargon". A future candidate
+  run should set a representative `MEETILY_TEST_VOCABULARY` (add the env var to the harness)
+  so the jargon-biasing half of the gate is measured too. Related: the eval doc self-flags
+  that the recording's provenance is an assumption, and its raw transcripts live outside
+  the repo, so the coverage percentages there cannot be re-derived from a clean checkout.

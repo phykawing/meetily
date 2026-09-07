@@ -303,8 +303,21 @@ The application will be built with Metal GPU acceleration automatically.
 - **Rust:** Install from [rust-lang.org](https://www.rust-lang.org/tools/install).
 - **Visual Studio Build Tools:** Install the "Desktop development with C++" workload from the Visual Studio Installer.
 - **CMake:** Download and install from [cmake.org](https://cmake.org/download/).
+- **LLVM / Clang 17:** `whisper-rs`'s `bindgen` step needs libclang. Newer libclang (18+)
+  fails to parse whisper.cpp's headers and silently emits an opaque parameter struct, which
+  surfaces as dozens of misleading "no field on type" errors in `whisper-rs-sys`'s own
+  generated source. Install LLVM 17 and point `LIBCLANG_PATH` at its `bin` directory.
 
 ### 2. Build and Run
+
+> **UTF-8 compiler flag (required).** whisper.cpp has non-ASCII string literals that MSVC
+> misreads under the default code page, breaking the build. Set the flag before building:
+>
+> ```powershell
+> $env:CFLAGS = "/utf-8"; $env:CXXFLAGS = "/utf-8"
+> ```
+>
+> This is also required for `cargo build`/`cargo test -p meetily` directly.
 
 ```powershell
 # Development mode (with hot reload)

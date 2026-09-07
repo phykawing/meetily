@@ -47,6 +47,7 @@ next-env.d.ts
 
 # Audio files
 *.wav
+*.mp3
 
 # Large media files
 docs/demo.mov
