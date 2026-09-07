@@ -34,6 +34,10 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
   const [selectedModelKey, setSelectedModelKey] = useState<string>('');
   const [loadingModels, setLoadingModels] = useState(false);
+  // True once fetchModels has settled at least once. Unlike `loadingModels` it does not
+  // flap back to false on a refetch, so it is safe for consumers that must not act on model
+  // capability until the list has actually arrived.
+  const [modelsLoaded, setModelsLoaded] = useState(false);
   // Track whether the user has manually changed the model selection
   const userSelectedRef = useRef(false);
 
@@ -107,6 +111,7 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
     }
 
     setLoadingModels(false);
+    setModelsLoaded(true);
   }, [transcriptModelConfig]);
 
   // Reset user selection tracking (call when dialog opens fresh)
@@ -119,6 +124,7 @@ export function useTranscriptionModels(transcriptModelConfig: TranscriptModelCon
     selectedModelKey,
     setSelectedModelKey: setSelectedModelKeyWithTracking,
     loadingModels,
+    modelsLoaded,
     fetchModels,
     resetSelection,
   };

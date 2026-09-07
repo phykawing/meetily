@@ -91,6 +91,7 @@ export function ImportAudioDialog({
     selectedModelKey,
     setSelectedModelKey,
     loadingModels,
+    modelsLoaded,
     fetchModels,
     resetSelection,
   } = useTranscriptionModels(transcriptModelConfig);
@@ -183,14 +184,21 @@ export function ImportAudioDialog({
     }
   }, [isParakeetModel, selectedLang]);
 
-  // Switching to a model that can't serve Cantonese (or one not yet identified) must not
-  // leave a stale 'yue' selection sitting behind a disabled option — that reaches the
-  // backend as an unsupported-language error instead of falling back cleanly.
+  // Switching to a model that can't serve Cantonese must not leave a stale 'yue' selection
+  // sitting behind a disabled option — that reaches the backend as an unsupported-language
+  // error instead of falling back cleanly. Only act once a concrete model is actually
+  // resolved, though: resetting while the model list is still loading would silently drop a
+  // Cantonese default that the picker could serve.
   useEffect(() => {
-    if (cantoneseReason && selectedLang === CANTONESE_LANGUAGE_CODE) {
+    if (
+      modelsLoaded &&
+      selectedModel &&
+      cantoneseReason &&
+      selectedLang === CANTONESE_LANGUAGE_CODE
+    ) {
       setSelectedLang('auto');
     }
-  }, [cantoneseReason, selectedLang]);
+  }, [modelsLoaded, selectedModel, cantoneseReason, selectedLang]);
 
   const handleSelectFile = async () => {
     const info = await selectFile();

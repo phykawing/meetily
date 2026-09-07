@@ -50,6 +50,9 @@ interface ConfigContextType {
   // Transcript model configuration
   transcriptModelConfig: TranscriptModelProps;
   setTranscriptModelConfig: (config: TranscriptModelProps | ((prev: TranscriptModelProps) => TranscriptModelProps)) => void;
+  // False until the saved transcript config has been loaded. `transcriptModelConfig`
+  // defaults to Parakeet, so consumers that key off the provider must wait for this.
+  transcriptConfigLoaded: boolean;
 
   // Device configuration
   selectedDevices: SelectedDevices;
@@ -111,6 +114,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     model: 'parakeet-tdt-0.6b-v3-int8',
     apiKey: null
   });
+  const [transcriptConfigLoaded, setTranscriptConfigLoaded] = useState(false);
 
   // Provider-specific API keys (loaded once at startup)
   // Note: Gemini omitted for now - add when UI support is added
@@ -206,6 +210,10 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
         }
       } catch (error) {
         console.error('[ConfigContext] Failed to load transcript config:', error);
+      } finally {
+        // Either way the config is now as loaded as it is going to get; consumers keying
+        // off the provider (which defaults to Parakeet) can stop waiting.
+        setTranscriptConfigLoaded(true);
       }
     };
     loadTranscriptConfig();
@@ -491,6 +499,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     updateProviderApiKey,
     transcriptModelConfig,
     setTranscriptModelConfig,
+    transcriptConfigLoaded,
     selectedDevices,
     setSelectedDevices,
     selectedLanguage,
@@ -514,6 +523,7 @@ export function ConfigProvider({ children }: { children: ReactNode }) {
     providerApiKeys,
     updateProviderApiKey,
     transcriptModelConfig,
+    transcriptConfigLoaded,
     selectedDevices,
     selectedLanguage,
     handleSetSelectedLanguage,

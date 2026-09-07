@@ -5,7 +5,7 @@ import Analytics from '@/lib/analytics';
 import { toast } from 'sonner';
 import { useConfig } from '@/contexts/ConfigContext';
 import { LANGUAGES, CANTONESE_LANGUAGE_CODE } from '@/constants/languages';
-import { cantoneseUnavailableReason } from '@/lib/cantonese-capability';
+import { cantoneseUnavailableReason, cantoneseCapabilityKnown } from '@/lib/cantonese-capability';
 import type { ModelInfo } from '@/lib/whisper';
 
 interface LanguageSelectionProps {
@@ -26,7 +26,10 @@ export function LanguageSelection({
 }: LanguageSelectionProps) {
   const [saving, setSaving] = useState(false);
   const [whisperModels, setWhisperModels] = useState<ModelInfo[]>([]);
-  const { setSelectedLanguage } = useConfig();
+  // Only true once whisper_get_available_models has actually returned. Left false on IPC
+  // failure on purpose: with capability unknowable we must not reset a saved selection.
+  const [modelsLoaded, setModelsLoaded] = useState(false);
+  const { setSelectedLanguage, transcriptConfigLoaded } = useConfig();
 
   // Parakeet only supports auto-detection (doesn't support manual language selection)
   const isParakeet = provider === 'parakeet';
@@ -39,7 +42,10 @@ export function LanguageSelection({
     const fetchModels = () => {
       invoke<ModelInfo[]>('whisper_get_available_models')
         .then((models) => {
-          if (!cancelled) setWhisperModels(models);
+          if (!cancelled) {
+            setWhisperModels(models);
+            setModelsLoaded(true);
+          }
         })
         .catch((err) => {
           console.error('Failed to fetch Whisper models for language capability check:', err);
@@ -69,15 +75,23 @@ export function LanguageSelection({
       })
     : null;
 
-  // Switching to a model that can't serve Cantonese (or one not yet identified) must not
-  // leave a stale selection behind a disabled option — that reaches the backend as an
-  // unsupported-language error instead of falling back cleanly.
+  // Switching to a model that can't serve Cantonese must not leave a stale selection behind
+  // a disabled option — that reaches the backend as an unsupported-language error instead of
+  // falling back cleanly. But only once capability is actually known: acting while the
+  // provider, model name or model list are still loading would reset the user's saved
+  // Cantonese choice on a guess, and this write persists (localStorage + Rust).
+  const capabilityKnown = cantoneseCapabilityKnown({
+    configLoaded: transcriptConfigLoaded,
+    isParakeet,
+    modelsLoaded,
+    modelName,
+  });
   useEffect(() => {
-    if (cantoneseReason && selectedLanguage === CANTONESE_LANGUAGE_CODE) {
+    if (capabilityKnown && cantoneseReason && selectedLanguage === CANTONESE_LANGUAGE_CODE) {
       setSelectedLanguage('auto');
       onLanguageChange('auto');
     }
-  }, [cantoneseReason, selectedLanguage]);
+  }, [capabilityKnown, cantoneseReason, selectedLanguage]);
 
   const availableLanguages = isParakeet
     ? LANGUAGES.filter(lang => lang.code === 'auto' || lang.code === 'auto-translate' || lang.code === CANTONESE_LANGUAGE_CODE)
