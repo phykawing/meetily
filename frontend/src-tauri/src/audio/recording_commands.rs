@@ -90,6 +90,27 @@ fn known_transcription_language() -> Option<String> {
         .filter(|lang| lang != "auto" && lang != "auto-translate")
 }
 
+/// Recording-start pre-flight: refuse to start when the loaded model cannot serve the
+/// selected Transcription Language, so the mismatch surfaces as one actionable error
+/// before capture instead of an empty transcript plus an error per chunk. Emits the same
+/// `transcription-error` shape the transcription worker uses so the frontend handles both
+/// the same way.
+async fn reject_incapable_language<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    if let Err(language_error) = transcription::ensure_language_supported(app).await {
+        error!("Language pre-flight check failed: {}", language_error);
+        let _ = app.emit(
+            "transcription-error",
+            serde_json::json!({
+                "error": language_error,
+                "userMessage": language_error,
+                "actionable": true
+            }),
+        );
+        return Err(language_error);
+    }
+    Ok(())
+}
+
 // ============================================================================
 // RECORDING COMMANDS
 // ============================================================================
@@ -134,6 +155,8 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         return Err(validation_error);
     }
     info!("✅ Transcription model validation passed");
+
+    reject_incapable_language(&app).await?;
 
     // Async-first approach - no more blocking operations!
     info!("🚀 Starting async recording initialization");
@@ -387,6 +410,8 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         return Err(validation_error);
     }
     info!("✅ Transcription model validation passed");
+
+    reject_incapable_language(&app).await?;
 
     // Parse devices
     let mic_device = if let Some(ref name) = mic_device_name {

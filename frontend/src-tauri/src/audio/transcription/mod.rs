@@ -15,6 +15,7 @@ pub use parakeet_provider::ParakeetProvider;
 pub use engine::{
     TranscriptionEngine,
     validate_transcription_model_ready,
+    ensure_language_supported,
     get_or_init_transcription_engine,
     get_or_init_whisper
 };

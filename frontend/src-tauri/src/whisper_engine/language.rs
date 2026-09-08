@@ -62,10 +62,41 @@ pub enum LanguageResolution<'a> {
     AutoDetect { translate: bool },
     /// Force this token.
     Forced(&'a str),
-    /// The loaded model cannot serve this language. Callers should surface
-    /// `TranscriptionError::UnsupportedLanguage` rather than silently transcribing.
+    /// The loaded model cannot serve this language. `WhisperEngine::resolve_decoding` turns
+    /// this into an [`UnsupportedLanguageError`] carried by its `anyhow::Error`; the
+    /// transcription providers (`whisper_provider.rs`, `worker.rs`) then map it onto
+    /// `TranscriptionError::UnsupportedLanguage` so the user sees the actionable message
+    /// with `actionable: true`. Recording start also runs `resolve_decoding` as a
+    /// pre-flight check and refuses to begin capture on this case.
     Unsupported,
 }
+
+/// The loaded model cannot decode the language the user picked in the UI.
+///
+/// Constructed by `WhisperEngine::resolve_decoding` and wrapped in its `anyhow::Error` so
+/// the provider boundary can `downcast_ref` it back out and raise
+/// `TranscriptionError::UnsupportedLanguage` instead of a doubly-wrapped `EngineFailed`
+/// string. The `Display` text is the actionable, ready-to-show message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnsupportedLanguageError {
+    /// UI-facing language code (e.g. `yue`).
+    pub ui_language: String,
+    /// Name of the model that is loaded but cannot serve it.
+    pub model_name: String,
+}
+
+impl std::fmt::Display for UnsupportedLanguageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Model '{}' cannot transcribe '{}'. Load a Cantonese-capable model \
+             (large-v3 family, or a registered Cantonese model).",
+            self.model_name, self.ui_language
+        )
+    }
+}
+
+impl std::error::Error for UnsupportedLanguageError {}
 
 /// Builds the initial prompt from the language's built-in seed plus the user's meeting
 /// vocabulary (names, jargon, product terms). Returns `None` when there is nothing to say.
@@ -131,6 +162,19 @@ mod tests {
         assert_eq!(
             engine_language_for(CANTONESE, "my-cantonese-small", Some("zh")),
             LanguageResolution::Forced("zh")
+        );
+    }
+
+    #[test]
+    fn unsupported_language_error_renders_the_actionable_message() {
+        let err = UnsupportedLanguageError {
+            ui_language: CANTONESE.to_string(),
+            model_name: "base".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "Model 'base' cannot transcribe 'yue'. Load a Cantonese-capable model \
+             (large-v3 family, or a registered Cantonese model)."
         );
     }
 

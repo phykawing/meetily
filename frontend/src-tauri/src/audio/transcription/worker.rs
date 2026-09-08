@@ -82,6 +82,11 @@ pub fn start_transcription_task<R: Runtime>(
         let chunks_queued = Arc::new(AtomicU64::new(0));
         let chunks_completed = Arc::new(AtomicU64::new(0));
         let input_finished = Arc::new(AtomicBool::new(false));
+        // Set once any worker finds the loaded model cannot serve the selected language —
+        // a whole-session condition. Shared so that if NUM_WORKERS is ever raised above 1,
+        // only the first worker to hit it emits the error and stops the recording; the
+        // rest just drain their queues.
+        let language_unsupported = Arc::new(AtomicBool::new(false));
 
         info!("📊 Starting {} transcription worker{} (serial mode for ordered emission)", NUM_WORKERS, if NUM_WORKERS == 1 { "" } else { "s" });
 
@@ -98,6 +103,7 @@ pub fn start_transcription_task<R: Runtime>(
             let chunks_completed_clone = chunks_completed.clone();
             let input_finished_clone = input_finished.clone();
             let chunks_queued_clone = chunks_queued.clone();
+            let language_unsupported = language_unsupported.clone();
 
             let worker_handle = tokio::spawn(async move {
                 info!("👷 Worker {} started", worker_id);
@@ -140,6 +146,14 @@ pub fn start_transcription_task<R: Runtime>(
                                     chunk.chunk_id,
                                     chunk.data.len()
                                 );
+                            }
+
+                            // A prior chunk hit the unsupported-language backstop and the
+                            // recording is already being torn down. Drain the rest quietly
+                            // so the end-of-task counter check still balances.
+                            if language_unsupported.load(Ordering::SeqCst) {
+                                chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
+                                continue;
                             }
 
                             // Check if model is still loaded before processing
@@ -257,6 +271,35 @@ pub fn start_transcription_task<R: Runtime>(
                                         }
                                         TranscriptionError::ModelNotLoaded => {
                                             warn!("Worker {}: Model unloaded during transcription", worker_id);
+                                            chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
+                                            continue;
+                                        }
+                                        TranscriptionError::UnsupportedLanguage(ref message) => {
+                                            // The loaded model cannot serve the selected
+                                            // language — a whole-session condition, not a
+                                            // per-chunk hiccup. The recording-start
+                                            // pre-flight normally catches this; reaching
+                                            // here means the model or language changed
+                                            // mid-session. Stop the recording once (the
+                                            // actionable transcription-error was already
+                                            // emitted by transcribe_chunk_with_provider)
+                                            // instead of warning on every remaining chunk.
+                                            if !language_unsupported.swap(true, Ordering::SeqCst) {
+                                                error!("Worker {}: {} — aborting recording", worker_id, message);
+                                                let app_for_stop = app_clone.clone();
+                                                tokio::spawn(async move {
+                                                    if let Err(stop_err) = crate::audio::recording_commands::stop_recording(
+                                                        app_for_stop,
+                                                        crate::audio::recording_commands::RecordingArgs {
+                                                            save_path: String::new(),
+                                                        },
+                                                    )
+                                                    .await
+                                                    {
+                                                        warn!("Failed to stop recording after unsupported-language error: {}", stop_err);
+                                                    }
+                                                });
+                                            }
                                             chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
                                             continue;
                                         }
@@ -482,15 +525,8 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                         chunk.chunk_id, e
                     );
 
-                    let transcription_error = TranscriptionError::EngineFailed(e.to_string());
-                    let _ = app.emit(
-                        "transcription-error",
-                        &serde_json::json!({
-                            "error": transcription_error.to_string(),
-                            "userMessage": format!("Transcription failed: {}", transcription_error),
-                            "actionable": false
-                        }),
-                    );
+                    let transcription_error = TranscriptionError::from_engine_error(e);
+                    emit_transcription_error(app, &transcription_error);
 
                     Err(transcription_error)
                 }
@@ -519,14 +555,7 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                     );
 
                     let transcription_error = TranscriptionError::EngineFailed(e.to_string());
-                    let _ = app.emit(
-                        "transcription-error",
-                        &serde_json::json!({
-                            "error": transcription_error.to_string(),
-                            "userMessage": format!("Transcription failed: {}", transcription_error),
-                            "actionable": false
-                        }),
-                    );
+                    emit_transcription_error(app, &transcription_error);
 
                     Err(transcription_error)
                 }
@@ -567,20 +596,35 @@ async fn transcribe_chunk_with_provider<R: Runtime>(
                         e
                     );
 
-                    let _ = app.emit(
-                        "transcription-error",
-                        &serde_json::json!({
-                            "error": e.to_string(),
-                            "userMessage": format!("Transcription failed: {}", e),
-                            "actionable": false
-                        }),
-                    );
+                    emit_transcription_error(app, &e);
 
                     Err(e)
                 }
             }
         }
     }
+}
+
+/// Emit a `transcription-error` event for a failed chunk. An actionable error (the loaded
+/// model cannot serve the selected language) is shown to the user verbatim — it already
+/// names the model and the fix — and flagged `actionable: true` so the frontend opens the
+/// model picker instead of a transient toast. Everything else keeps the generic
+/// "Transcription failed: …" framing.
+fn emit_transcription_error<R: Runtime>(app: &AppHandle<R>, error: &TranscriptionError) {
+    let actionable = error.is_actionable();
+    let user_message = if actionable {
+        error.to_string()
+    } else {
+        format!("Transcription failed: {}", error)
+    };
+    let _ = app.emit(
+        "transcription-error",
+        &serde_json::json!({
+            "error": error.to_string(),
+            "userMessage": user_message,
+            "actionable": actionable,
+        }),
+    );
 }
 
 /// Format current timestamp (wall-clock time)

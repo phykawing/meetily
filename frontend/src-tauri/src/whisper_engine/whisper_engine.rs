@@ -13,7 +13,7 @@ use tokio::io::AsyncWriteExt;
 use crate::config::WHISPER_MODEL_CATALOG;
 use super::acceleration::{whisper_context_acceleration_for, WhisperCompiledBackend};
 use super::custom_models::{self, CustomModel};
-use super::language::{self, LanguageResolution};
+use super::language::{self, LanguageResolution, UnsupportedLanguageError};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ModelStatus {
@@ -316,11 +316,35 @@ impl WhisperEngine {
         *self.vocabulary.write().await = cleaned;
     }
 
+    /// Fails fast when the loaded model cannot decode `ui_language`, without doing the
+    /// rest of the decoding setup — the recording-start pre-flight check (see
+    /// `audio/transcription/engine.rs`). Only the capability case is an error here; any
+    /// other `resolve_decoding` failure (e.g. no model loaded) is left for the existing
+    /// paths to report and maps to `Ok(())`.
+    pub async fn ensure_language_supported(
+        &self,
+        ui_language: Option<&str>,
+    ) -> std::result::Result<(), UnsupportedLanguageError> {
+        match self.resolve_decoding(ui_language).await {
+            Ok(_) => Ok(()),
+            Err(e) => match e.downcast::<UnsupportedLanguageError>() {
+                Ok(unsupported) => Err(unsupported),
+                // Not a capability problem (e.g. "No model loaded" — which
+                // validate_transcription_model_ready has already ruled out by the time
+                // the pre-flight runs). Not this gate's job to report.
+                Err(_) => Ok(()),
+            },
+        }
+    }
+
     /// Resolves the language token and initial prompt for the currently loaded model.
     ///
     /// Both live here rather than at the call sites because the answer depends on *which*
     /// model is loaded: the same UI language maps to different engine tokens depending on
-    /// what the model was trained with. See whisper_engine/language.rs.
+    /// what the model was trained with. See whisper_engine/language.rs. The unsupported
+    /// case carries an [`UnsupportedLanguageError`] inside the `anyhow::Error` so the
+    /// provider boundary can recover it with `downcast_ref` (see
+    /// `TranscriptionError::from_engine_error`).
     async fn resolve_decoding(
         &self,
         ui_language: Option<&str>,
@@ -349,12 +373,10 @@ impl WhisperEngine {
             LanguageResolution::AutoDetect { translate } => (None, translate),
             LanguageResolution::Forced(code) => (Some(code.to_string()), false),
             LanguageResolution::Unsupported => {
-                return Err(anyhow!(
-                    "Model '{}' cannot transcribe '{}'. Load a Cantonese-capable model \
-                     (large-v3 family, or a registered Cantonese model).",
+                return Err(anyhow!(UnsupportedLanguageError {
+                    ui_language: ui_language.to_string(),
                     model_name,
-                    ui_language
-                ));
+                }));
             }
         };
 
@@ -1287,6 +1309,14 @@ mod tests {
             err.to_string().starts_with("Model 'base' cannot transcribe 'yue'."),
             "unexpected error: {err}"
         );
+
+        // The provider boundary keys on the typed error, not the string, to raise
+        // TranscriptionError::UnsupportedLanguage with actionable: true.
+        let typed = err
+            .downcast_ref::<UnsupportedLanguageError>()
+            .expect("capability failure must carry UnsupportedLanguageError");
+        assert_eq!(typed.model_name, "base");
+        assert_eq!(typed.ui_language, "yue");
     }
 
     #[tokio::test]
@@ -1337,6 +1367,34 @@ mod tests {
         assert_eq!(language_code.as_deref(), Some("zh"));
         assert!(!translate);
         assert_eq!(prompt.as_deref(), Some(language::CANTONESE_PROMPT_SEED));
+    }
+
+    #[tokio::test]
+    async fn ensure_language_supported_is_the_preflight_gate() {
+        let (engine, _dir) = engine_without_model();
+
+        // Incapable pair: the pre-flight check rejects with the typed error.
+        *engine.current_model.write().await = Some("base".to_string());
+        let err = engine
+            .ensure_language_supported(Some(language::CANTONESE))
+            .await
+            .expect_err("base cannot serve Cantonese");
+        assert_eq!(err.model_name, "base");
+        assert_eq!(err.ui_language, "yue");
+
+        // Capable pair passes.
+        *engine.current_model.write().await = Some("large-v3".to_string());
+        engine
+            .ensure_language_supported(Some(language::CANTONESE))
+            .await
+            .expect("large-v3 serves Cantonese");
+
+        // A non-capability failure (no model loaded) is not this gate's concern.
+        *engine.current_model.write().await = None;
+        engine
+            .ensure_language_supported(Some(language::CANTONESE))
+            .await
+            .expect("missing model is left for other checks to report");
     }
 
     /// Confirms a locally converted ggml file loads through the exact whisper.cpp build

@@ -34,7 +34,7 @@ impl TranscriptionProvider for WhisperProvider {
                 confidence: Some(confidence),
                 is_partial,
             }),
-            Err(e) => Err(TranscriptionError::EngineFailed(e.to_string())),
+            Err(e) => Err(TranscriptionError::from_engine_error(e)),
         }
     }
 

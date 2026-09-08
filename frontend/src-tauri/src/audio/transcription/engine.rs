@@ -145,6 +145,58 @@ pub async fn validate_transcription_model_ready<R: Runtime>(app: &AppHandle<R>) 
     }
 }
 
+/// Pre-flight check, run at recording start after the model is validated and loaded but
+/// before audio capture begins: refuse to start when the loaded Whisper model cannot
+/// decode the user's selected Transcription Language.
+///
+/// Without this the mismatch is only discovered per chunk once transcription is already
+/// running, producing a meeting of empty transcript plus an error per chunk. The
+/// frontend's capability gate normally prevents an incapable pair from being selected;
+/// this is the backend backstop for when it does not (stale setting, model swapped).
+///
+/// Only the unsupported-language case blocks. A missing engine or unloaded model is left
+/// for `validate_transcription_model_ready` to report, and non-Whisper providers have no
+/// per-language capability gate.
+pub async fn ensure_language_supported<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    let config = match crate::api::api::api_get_transcript_config(
+        app.clone(),
+        app.clone().state(),
+        None,
+    )
+    .await
+    {
+        Ok(Some(config)) => config,
+        // No config or a read failure: nothing to check here, and the model-readiness
+        // validation that ran just before covers the "can we transcribe at all" question.
+        Ok(None) => return Ok(()),
+        Err(e) => {
+            warn!("⚠️ ensure_language_supported: could not read transcript config: {}", e);
+            return Ok(());
+        }
+    };
+
+    if config.provider != "localWhisper" {
+        return Ok(());
+    }
+
+    let engine = {
+        let guard = crate::whisper_engine::commands::WHISPER_ENGINE.lock().unwrap();
+        guard.as_ref().cloned()
+    };
+    let Some(engine) = engine else {
+        return Ok(());
+    };
+
+    let language = crate::get_language_preference_internal();
+    match engine.ensure_language_supported(language.as_deref()).await {
+        Ok(()) => Ok(()),
+        Err(unsupported) => {
+            warn!("❌ Pre-flight language check failed: {}", unsupported);
+            Err(unsupported.to_string())
+        }
+    }
+}
+
 /// Get or initialize the appropriate transcription engine based on provider configuration
 pub async fn get_or_init_transcription_engine<R: Runtime>(
     app: &AppHandle<R>,
