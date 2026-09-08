@@ -113,6 +113,11 @@ thiserror = "2.0.16"                # Error handling for Parakeet
 # (duplicate-symbol LNK2005s). Shared linking avoids that by isolating sherpa-onnx's CRT
 # usage inside its own DLL.
 sherpa-onnx = { version = "1.13.5", default-features = false, features = ["shared"] }
+# Direct dependency only so Cargo orders its build script before ours: its
+# `links = "sherpa-onnx"` gives the ordering edge only to a *direct* dependent,
+# and `build/sherpa.rs` reads the runtime DLLs that build script stages. Keep
+# the features in sync with the `sherpa-onnx` line above.
+sherpa-onnx-sys = { version = "1.13.5", default-features = false, features = ["shared"] }
 
 # Async
 tokio = { version = "1.32.0", features = ["full", "tracing"] }

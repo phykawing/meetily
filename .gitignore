@@ -78,3 +78,4 @@ experiments/
 target/
 
 frontend/src-tauri/binaries/
+frontend/src-tauri/runtime-dlls/

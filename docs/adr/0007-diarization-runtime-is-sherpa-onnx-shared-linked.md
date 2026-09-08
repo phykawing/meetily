@@ -22,18 +22,31 @@ isolated inside its own DLLs (`sherpa-onnx-c-api.dll`, `sherpa-onnx-cxx-api.dll`
 `onnxruntime.dll`, `onnxruntime_providers_shared.dll`), which the build script copies next
 to the build output (`target/<profile>/`).
 
-**Consequence — Windows packaging is unfinished.** Those four DLLs must sit next to the
-*installed* `meetily.exe` for the OS loader to resolve sherpa-onnx-c-api.dll's implicit
+**Windows packaging — resolved (phykawing/meetily#35).** Those four DLLs must sit next to
+the *installed* `meetily.exe` for the OS loader to resolve sherpa-onnx-c-api.dll's implicit
 imports; `cargo run`/`tauri dev` gets this for free since the exe and DLLs land in the same
-`target/<profile>/` directory, but the NSIS/MSI bundle does not yet copy them there.
-`tauri.conf.json`'s `bundle.resources` was tried and reverted: Tauri's build script
-validates every resource's *source* path exists at compile time, and `target/release/*.dll`
-does not exist during a `debug` build (or vice versa) — the resources array can't easily
-reference a profile-dependent path. **Whoever ships the first Windows build with
-diarization must solve this** (most likely: a build step that copies the four DLLs into
-`src-tauri/binaries/` and adds them to `externalBin`, or a `/DELAYLOAD` + `SetDllDirectory`
-approach) **and smoke-test that build** — without it, the packaged app fails to launch at
-all, not just diarization.
+`target/<profile>/` directory, but the NSIS/MSI bundle did not copy them there.
+
+Pointing `tauri.conf.json`'s `bundle.resources` array straight at `target/<profile>/*.dll`
+fails: Tauri validates every resource's *source* path at compile time, and that path is
+profile-dependent and absent during the other profile's build. The fix routes through a
+stable committed path instead:
+
+- `build/sherpa.rs` (`ensure_runtime_dlls`, called from `build.rs` **before**
+  `tauri_build::build()`) copies the four DLLs into `src-tauri/runtime-dlls/` (git-ignored,
+  like `binaries/`). It reads them from the pristine `target/sherpa-onnx-prebuilt/.../lib/`
+  extraction, falling back to `target/[<triple>/]<profile>/` and `$SHERPA_ONNX_LIB_DIR`;
+  it panics if none is found, so a Windows build can't silently produce a broken installer.
+- `sherpa-onnx-sys` is now a **direct** dependency of the app crate. Its
+  `links = "sherpa-onnx"` gives Cargo the edge that runs its build script (which stages the
+  DLLs) before ours; a transitive-only dependency gives no such ordering guarantee.
+- `tauri.windows.conf.json` (auto-merged on Windows only) lists each DLL under
+  `bundle.resources` in map form, mapped to a bare filename, so the bundler places them at
+  the installation root next to the executable. It re-lists `templates/*.json` because a
+  JSON-merge-patch object replaces the base array rather than extending it.
+
+The remaining `onnxruntime.dll` name collision below is **not** fixed by this and is
+tracked separately (phykawing/meetily#43).
 
 **Also unresolved: `onnxruntime.dll` name collision with `ort`.** Windows 11 ships its own
 system `onnxruntime.dll` (WinML) in `System32`. When sherpa's own copy is missing from the

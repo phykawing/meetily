@@ -3723,6 +3723,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sherpa-onnx",
+ "sherpa-onnx-sys",
  "silero",
  "sqlx",
  "strsim 0.10.0",
