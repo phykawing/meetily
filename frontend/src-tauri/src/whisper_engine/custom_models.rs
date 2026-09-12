@@ -17,6 +17,8 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::config::WHISPER_MODEL_CATALOG;
+use super::language;
+use super::whisper_engine::{ModelInfo, ModelStatus};
 
 const REGISTRY_FILE: &str = "custom-models.json";
 
@@ -132,6 +134,31 @@ fn validate(model: &CustomModel) -> Result<()> {
             model.name
         ));
     }
+    // A name that merely starts with "large-v3" (e.g. `large-v3-mine`) is not caught by the
+    // exact-match check above, but `language::is_cantonese_capable_builtin` matches on that
+    // same prefix — such a name would silently be treated as a stock Cantonese-capable
+    // checkpoint and forced to `zh`, ignoring its own declaration. Checked via the same
+    // predicate rather than a generic catalog-prefix scan: only this one family has
+    // prefix-based special-casing anywhere in the engine, and a scan over every catalog
+    // name (`tiny`, `small`, `medium`, ...) would reject perfectly good names like
+    // `small-cantonese` that nothing actually treats specially.
+    if language::is_cantonese_capable_builtin(&model.name) {
+        return Err(anyhow!(
+            "'{}' would be treated as a built-in Cantonese-capable model (its name matches \
+             the large-v3 family); choose a different name",
+            model.name
+        ));
+    }
+    // Nothing in a ggml file says what language it was trained on, so a Cantonese claim
+    // with no declared token can't be honoured by `resolve_decoding` — it would fall
+    // through to the builtin capability rule, which never matches a non-catalog name, and
+    // silently resolve as unsupported despite being advertised as Cantonese-capable.
+    if model.supports_cantonese && model.engine_language.is_none() {
+        return Err(anyhow!(
+            "A Cantonese-capable model must declare the language token it was trained with \
+             (e.g. 'yue' or 'zh')"
+        ));
+    }
     if !model.path.is_file() {
         return Err(anyhow!(
             "No file at {} — the model file must exist when it is registered",
@@ -146,6 +173,33 @@ pub fn size_mb(model: &CustomModel) -> u32 {
     std::fs::metadata(&model.path)
         .map(|m| (m.len() / (1024 * 1024)) as u32)
         .unwrap_or(0)
+}
+
+/// Builds the `ModelInfo` shown in the model manager for a registered custom model. Shared
+/// by `WhisperEngine::discover_models` and the standalone fallback (used before the engine
+/// initializes) so the two paths cannot drift on how a custom model is presented.
+pub fn to_model_info(model: CustomModel) -> ModelInfo {
+    let size = size_mb(&model);
+    let status = if model.path.is_file() {
+        ModelStatus::Available
+    } else {
+        log::warn!(
+            "Custom model '{}' is registered but its file is missing: {}",
+            model.name,
+            model.path.display()
+        );
+        ModelStatus::Missing
+    };
+    ModelInfo {
+        name: model.name,
+        size_mb: size,
+        path: model.path,
+        accuracy: "Custom".to_string(),
+        speed: "Custom".to_string(),
+        status,
+        description: model.description,
+        supports_cantonese: model.supports_cantonese,
+    }
 }
 
 #[cfg(test)]
@@ -197,6 +251,9 @@ mod tests {
         let file = dummy_model_file(&dir);
         let mut model = model("  cantonese-turbo  ", file);
         model.engine_language = Some("  ".to_string());
+        // Blanking engine_language would otherwise collide with the "Cantonese needs a
+        // declared token" rule; this test is about trimming, not that rule.
+        model.supports_cantonese = false;
         model.description = "  spaced out  ".to_string();
         add(&dir, model).unwrap();
 
@@ -236,6 +293,52 @@ mod tests {
     }
 
     #[test]
+    fn a_large_v3_prefixed_name_is_rejected() {
+        // "large-v3-mine" is not itself a catalog name, but
+        // `language::is_cantonese_capable_builtin` matches on `starts_with("large-v3")` -
+        // registering it would silently inherit stock large-v3 Cantonese capability.
+        let dir = temp_dir("family-prefix-clash");
+        let file = dummy_model_file(&dir);
+        let err = add(&dir, model("large-v3-mine", file)).unwrap_err();
+        assert!(err.to_string().contains("large-v3"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn a_name_prefixed_by_a_non_cantonese_family_is_allowed() {
+        // Only the large-v3 family gets prefix-based special-casing anywhere in the engine
+        // (see `language::is_cantonese_capable_builtin`); a name starting with `small`,
+        // `medium`, `base`, or `tiny` isn't treated specially by anything, and is exactly
+        // the kind of name a fine-tune based on one of those checkpoints would use.
+        let dir = temp_dir("non-cantonese-family-prefix");
+        for name in ["small-cantonese", "medium-mine", "base-improved", "tiny-custom"] {
+            let file = dir.join(format!("{name}.bin"));
+            std::fs::write(&file, b"not really a model").unwrap();
+            let mut m = model(name, file);
+            m.supports_cantonese = false;
+            add(&dir, m).unwrap_or_else(|e| panic!("{name} should register: {e}"));
+        }
+    }
+
+    #[test]
+    fn cantonese_capability_without_a_declared_token_is_rejected() {
+        let dir = temp_dir("cantonese-no-token");
+        let file = dummy_model_file(&dir);
+        let mut m = model("mine", file);
+        m.engine_language = None;
+        m.supports_cantonese = true;
+        let err = add(&dir, m).unwrap_err();
+        assert!(err.to_string().contains("language token"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn cantonese_capability_with_a_declared_token_is_accepted() {
+        let dir = temp_dir("cantonese-with-token");
+        let file = dummy_model_file(&dir);
+        let m = model("mine", file);
+        assert!(add(&dir, m).is_ok());
+    }
+
+    #[test]
     fn duplicate_names_are_rejected() {
         let dir = temp_dir("duplicate");
         let file = dummy_model_file(&dir);
@@ -262,5 +365,24 @@ mod tests {
     fn remove_reports_unknown_names() {
         let dir = temp_dir("remove");
         assert!(remove(&dir, "nothing-here").is_err());
+    }
+
+    #[test]
+    fn to_model_info_reports_missing_when_the_file_is_gone() {
+        let dir = temp_dir("to-model-info-missing");
+        let m = model("ghost", dir.join("nope.bin"));
+        let info = to_model_info(m);
+        assert!(matches!(info.status, ModelStatus::Missing));
+        assert_eq!(info.size_mb, 0);
+    }
+
+    #[test]
+    fn to_model_info_reports_available_when_the_file_exists() {
+        let dir = temp_dir("to-model-info-available");
+        let file = dummy_model_file(&dir);
+        let m = model("mine", file);
+        let info = to_model_info(m);
+        assert!(matches!(info.status, ModelStatus::Available));
+        assert!(info.supports_cantonese);
     }
 }

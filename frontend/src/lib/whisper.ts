@@ -10,8 +10,8 @@ export interface ModelInfo {
   supports_cantonese: boolean;
 }
 
-export type ModelAccuracy = 'High' | 'Good' | 'Decent';
-export type ProcessingSpeed = 'Slow' | 'Medium' | 'Fast' | 'Very Fast';
+export type ModelAccuracy = 'High' | 'Good' | 'Decent' | 'Custom';
+export type ProcessingSpeed = 'Slow' | 'Medium' | 'Fast' | 'Very Fast' | 'Custom';
 
 export type ModelStatus =
   | 'Available'
@@ -203,6 +203,13 @@ export function getModelPerformanceBadge(modelName: string): { label: string; co
 
 // Helper function to get concise tagline for model (similar to Parakeet style)
 export function getModelTagline(modelName: string, speed: ProcessingSpeed, accuracy: ModelAccuracy): string {
+  // A user-registered model: `speed`/`accuracy` are the literal string "Custom", not one of
+  // the catalog values below, and `modelName` is arbitrary - none of the base-name branches
+  // apply, so this would otherwise render as a bare " • ".
+  if (accuracy === 'Custom') {
+    return 'Custom registered model';
+  }
+
   const isQuantized = isQuantizedModel(modelName);
   const baseName = getModelBaseName(modelName);
 

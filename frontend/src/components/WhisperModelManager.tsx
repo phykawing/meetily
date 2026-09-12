@@ -35,6 +35,10 @@ export function ModelManager({
   const [initialized, setInitialized] = useState(false);
   const [downloadingModels, setDownloadingModels] = useState<Set<string>>(new Set());
   const [hasUserSelection, setHasUserSelection] = useState(false);
+  // The custom-model registry, lifted here (rather than fetched independently by
+  // CustomModelSection) so a removal reached from a model's Advanced Models card and one
+  // reached from the Custom Models accordion update the same state and can't drift.
+  const [customModels, setCustomModels] = useState<CustomModel[]>([]);
 
   // Refs for stable callbacks
   const onModelSelectRef = useRef(onModelSelect);
@@ -76,7 +80,14 @@ export function ModelManager({
       try {
         setLoading(true);
         await WhisperAPI.init();
-        const modelList = await WhisperAPI.getAvailableModels();
+        const [modelList, customModelList] = await Promise.all([
+          WhisperAPI.getAvailableModels(),
+          WhisperAPI.listCustomModels().catch(err => {
+            console.error('Failed to list custom models:', err);
+            return [] as CustomModel[];
+          })
+        ]);
+        setCustomModels(customModelList);
 
         // Apply persisted downloading states
         const persistedDownloading = getPersistedDownloadingModels();
@@ -356,6 +367,54 @@ export function ModelManager({
     }
   };
 
+  // Registers a custom model and folds the response registry straight into state, rather
+  // than re-fetching it - the register call already returns the up-to-date list. Shared by
+  // CustomModelSection, the only place registration happens; left to throw so the caller's
+  // own try/catch can show a registration-specific toast.
+  const registerCustomModel = async (payload: {
+    name: string;
+    path: string;
+    engineLanguage: string | null;
+    supportsCantonese: boolean;
+    description: string;
+  }): Promise<void> => {
+    const registry = await WhisperAPI.registerCustomModel(payload);
+    setCustomModels(registry);
+    await refreshModels();
+  };
+
+  // Unregisters a custom model - the model file itself is left alone, it was never copied
+  // in. The single place this happens, so a removal reached from a model's Advanced Models
+  // card and one reached from the Custom Models accordion clear the active selection and
+  // update the registry the same way. Left to throw so each call site can show its own
+  // toast without a second one firing here too.
+  const removeCustomModel = async (modelName: string): Promise<void> => {
+    const registry = await WhisperAPI.removeCustomModel(modelName);
+    setCustomModels(registry);
+    await refreshModels();
+
+    if (selectedModel === modelName && onModelSelect) {
+      onModelSelect('');
+    }
+  };
+
+  // Wraps removeCustomModel with a toast for the Advanced Models card's trash icon /
+  // Missing-state Remove button; CustomModelSection's own Remove button calls
+  // removeCustomModel directly and shows its own toast.
+  const removeCustomModelFromCard = async (modelName: string) => {
+    try {
+      await removeCustomModel(modelName);
+      toast.success(`${modelName} removed`, {
+        description: 'The model file itself was left in place'
+      });
+    } catch (err) {
+      console.error('Failed to remove custom model:', err);
+      toast.error(`Could not remove ${modelName}`, {
+        description: err instanceof Error ? err.message : 'Unknown error'
+      });
+    }
+  };
+
   const deleteModel = async (modelName: string) => {
     const displayName = getDisplayName(modelName);
 
@@ -448,6 +507,8 @@ export function ModelManager({
               onDelete={() => deleteModel(model.name)}
               isDownloading={downloadingModels.has(model.name)}
               displayName={getDisplayName(model.name)}
+              isCustom={model.accuracy === 'Custom'}
+              onRemoveCustom={() => removeCustomModelFromCard(model.name)}
             />
           );
         })}
@@ -478,6 +539,8 @@ export function ModelManager({
                     onDelete={() => deleteModel(model.name)}
                     isDownloading={downloadingModels.has(model.name)}
                     displayName={getDisplayName(model.name)}
+                    isCustom={model.accuracy === 'Custom'}
+                    onRemoveCustom={() => removeCustomModelFromCard(model.name)}
                   />
                 ))}
               </div>
@@ -487,7 +550,12 @@ export function ModelManager({
       )}
 
       {/* Custom (user-registered) models */}
-      <CustomModelSection onRegistryChange={refreshModels} />
+      <CustomModelSection
+        models={models}
+        customModels={customModels}
+        onRegister={registerCustomModel}
+        onRemove={removeCustomModel}
+      />
 
       {/* Helper text */}
       {selectedModel && (
@@ -510,7 +578,17 @@ export function ModelManager({
 // is what the engine forces when the model is selected, which is why it is asked for here:
 // nothing in a ggml file says what it was trained on.
 interface CustomModelSectionProps {
-  onRegistryChange: () => void;
+  models: ModelInfo[];
+  /** Owned by the parent (ModelManager), not fetched here - see its `customModels` state. */
+  customModels: CustomModel[];
+  onRegister: (payload: {
+    name: string;
+    path: string;
+    engineLanguage: string | null;
+    supportsCantonese: boolean;
+    description: string;
+  }) => Promise<void>;
+  onRemove: (name: string) => Promise<void>;
 }
 
 const emptyRegistration = {
@@ -521,16 +599,9 @@ const emptyRegistration = {
   description: ''
 };
 
-function CustomModelSection({ onRegistryChange }: CustomModelSectionProps) {
-  const [customModels, setCustomModels] = useState<CustomModel[]>([]);
+function CustomModelSection({ models, customModels, onRegister, onRemove }: CustomModelSectionProps) {
   const [form, setForm] = useState(emptyRegistration);
   const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    WhisperAPI.listCustomModels()
-      .then(setCustomModels)
-      .catch(err => console.error('Failed to list custom models:', err));
-  }, []);
 
   const browse = async () => {
     try {
@@ -551,13 +622,11 @@ function CustomModelSection({ onRegistryChange }: CustomModelSectionProps) {
   const register = async () => {
     setBusy(true);
     try {
-      const registry = await WhisperAPI.registerCustomModel({
+      await onRegister({
         ...form,
         engineLanguage: form.engineLanguage || null
       });
-      setCustomModels(registry);
       setForm(emptyRegistration);
-      onRegistryChange();
       toast.success(`${form.name} registered`, {
         description: 'It is now selectable under Advanced Models'
       });
@@ -575,8 +644,7 @@ function CustomModelSection({ onRegistryChange }: CustomModelSectionProps) {
 
   const remove = async (name: string) => {
     try {
-      setCustomModels(await WhisperAPI.removeCustomModel(name));
-      onRegistryChange();
+      await onRemove(name);
       toast.success(`${name} removed`, { description: 'The model file itself was left in place' });
     } catch (err) {
       toast.error(`Could not remove ${name}`, {
@@ -585,7 +653,11 @@ function CustomModelSection({ onRegistryChange }: CustomModelSectionProps) {
     }
   };
 
-  const canRegister = !busy && form.name.trim() !== '' && form.path.trim() !== '';
+  // Nothing in a ggml file says what it was trained on, so the backend rejects this
+  // combination at registration; catching it here lets the user see why before submitting
+  // rather than only after the request round-trips.
+  const cantoneseNeedsToken = form.supportsCantonese && form.engineLanguage.trim() === '';
+  const canRegister = !busy && form.name.trim() !== '' && form.path.trim() !== '' && !cantoneseNeedsToken;
 
   return (
     <Accordion type="single" collapsible className="w-full">
@@ -597,29 +669,41 @@ function CustomModelSection({ onRegistryChange }: CustomModelSectionProps) {
           <div className="space-y-4 pt-4">
             {customModels.length > 0 && (
               <div className="space-y-2">
-                {customModels.map(model => (
-                  <div
-                    key={model.name}
-                    className="flex items-start justify-between gap-3 rounded-lg border border-gray-200 bg-white p-3"
-                  >
-                    <div className="min-w-0">
-                      <div className="font-semibold text-gray-900">{model.name}</div>
-                      <div className="truncate font-mono text-xs text-gray-500">{model.path}</div>
-                      <div className="mt-1 text-xs text-gray-600">
-                        {model.engine_language
-                          ? `Decodes as "${model.engine_language}"`
-                          : 'Default language handling'}
-                        {model.supports_cantonese && ' • Cantonese-capable'}
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => remove(model.name)}
-                      className="shrink-0 rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 transition-colors hover:border-red-300 hover:text-red-600"
+                {customModels.map(model => {
+                  const isMissing = models.find(m => m.name === model.name)?.status === 'Missing';
+                  return (
+                    <div
+                      key={model.name}
+                      className="flex items-start justify-between gap-3 rounded-lg border border-gray-200 bg-white p-3"
                     >
-                      Remove
-                    </button>
-                  </div>
-                ))}
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <div className="font-semibold text-gray-900">{model.name}</div>
+                          {isMissing && (
+                            <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700">
+                              Missing
+                            </span>
+                          )}
+                        </div>
+                        <div className="truncate font-mono text-xs text-gray-500">{model.path}</div>
+                        <div className="mt-1 text-xs text-gray-600">
+                          {isMissing
+                            ? 'File not found at this path — remove it and register the model again'
+                            : model.engine_language
+                              ? `Decodes as "${model.engine_language}"`
+                              : 'Default language handling'}
+                          {!isMissing && model.supports_cantonese && ' • Cantonese-capable'}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => remove(model.name)}
+                        className="shrink-0 rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 transition-colors hover:border-red-300 hover:text-red-600"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             )}
 
@@ -671,6 +755,11 @@ function CustomModelSection({ onRegistryChange }: CustomModelSectionProps) {
                 />
                 This model was trained on Cantonese
               </label>
+              {cantoneseNeedsToken && (
+                <p className="text-xs text-amber-700">
+                  A Cantonese-capable model needs a declared language token (e.g. "yue" or "zh") above.
+                </p>
+              )}
 
               <button
                 onClick={register}
@@ -704,6 +793,10 @@ interface ModelCardProps {
   onDelete: () => void;
   isDownloading: boolean;
   displayName: string;
+  isCustom: boolean;
+  /** Unregisters a custom model without touching its file. Used instead of `onDelete`
+   *  (which unlinks the file on disk) and `onDownload` (which only knows catalog names). */
+  onRemoveCustom: () => void;
 }
 
 function ModelCard({
@@ -715,7 +808,9 @@ function ModelCard({
   onCancel,
   onDelete,
   isDownloading,
-  displayName
+  displayName,
+  isCustom,
+  onRemoveCustom
 }: ModelCardProps) {
   const [isHovered, setIsHovered] = useState(false);
 
@@ -820,10 +915,14 @@ function ModelCard({
                       transition={{ duration: 0.15 }}
                       onClick={(e) => {
                         e.stopPropagation();
-                        onDelete();
+                        if (isCustom) {
+                          onRemoveCustom();
+                        } else {
+                          onDelete();
+                        }
                       }}
                       className="text-gray-400 hover:text-red-600 transition-colors p-1"
-                      title="Delete model to free up space"
+                      title={isCustom ? 'Remove from the model list (keeps the file)' : 'Delete model to free up space'}
                     >
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -834,7 +933,25 @@ function ModelCard({
               </>
             )}
 
-            {isMissing && (
+            {isMissing && isCustom && (
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5 text-amber-600">
+                  <div className="w-2 h-2 bg-amber-500 rounded-full"></div>
+                  <span className="text-xs font-medium">Missing</span>
+                </div>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onRemoveCustom();
+                  }}
+                  className="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 transition-colors hover:border-red-300 hover:text-red-600"
+                >
+                  Remove
+                </button>
+              </div>
+            )}
+
+            {isMissing && !isCustom && (
               <button
                 onClick={(e) => {
                   e.stopPropagation();

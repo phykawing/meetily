@@ -70,17 +70,20 @@ pub async fn whisper_get_available_models() -> Result<Vec<ModelInfo>, String> {
     } else {
         // Fallback: scan models directory directly without initialized engine
         log::info!("Whisper engine not initialized, scanning models directory directly");
-        discover_models_standalone()
+        let models_dir = get_models_directory()
+            .ok_or_else(|| "Models directory not initialized".to_string())?;
+        discover_models_standalone(&models_dir)
     }
 }
 
-/// Discover Whisper models by scanning the models directory directly
-/// Used when the Whisper engine isn't initialized (e.g., when using Parakeet for live transcription)
-fn discover_models_standalone() -> Result<Vec<ModelInfo>, String> {
+/// Discover Whisper models by scanning the models directory directly, merging in the
+/// user-registered custom models. Used when the Whisper engine isn't initialized yet (e.g.
+/// a call that lands before the startup init task completes) - the engine's own
+/// `discover_models` is the normal path once it is up, and this must present the same
+/// custom models it would, or a registered fine-tune vanishes from the list depending on
+/// timing/provider alone.
+fn discover_models_standalone(models_dir: &PathBuf) -> Result<Vec<ModelInfo>, String> {
     use crate::whisper_engine::ModelStatus;
-
-    let models_dir = get_models_directory()
-        .ok_or_else(|| "Models directory not initialized".to_string())?;
 
     // Whisper models are stored directly in the models directory (not in a whisper subdirectory)
     let whisper_dir = models_dir.clone();
@@ -120,6 +123,12 @@ fn discover_models_standalone() -> Result<Vec<ModelInfo>, String> {
             description: description.to_string(),
             supports_cantonese: language::is_cantonese_capable_builtin(name),
         });
+    }
+
+    // User-registered models live outside the catalog and must show up here too - the
+    // engine-initialized path (whisper_engine.rs's discover_models) merges them the same way.
+    for custom in custom_models::load(&whisper_dir) {
+        models.push(custom_models::to_model_info(custom));
     }
 
     let downloaded_count = models.iter().filter(|m| matches!(m.status, ModelStatus::Available)).count();
@@ -532,17 +541,21 @@ pub async fn whisper_delete_corrupted_model(model_name: String) -> Result<String
 // Custom (user-registered) models
 //
 // A locally converted fine-tune - a Cantonese one, typically - is referenced in place
-// rather than downloaded, and declares the language token it was trained with. All three
-// commands go through the engine so its custom-model cache is refreshed in the same
-// call: that cache is what resolve_decoding() reads to pick the token, so a registration
-// that only touched the JSON file would not take effect until the next restart.
+// rather than downloaded, and declares the language token it was trained with. Registration
+// and removal read and write the registry directly (via the models directory, not the
+// engine), so they work even before the engine has finished initializing; when the engine
+// is up, both also refresh its custom-model cache in the same call, since that cache is
+// what resolve_decoding() reads to pick the token - a registration that only touched the
+// JSON file would not take effect until the next restart.
 // ============================================================================
 
-/// The registered custom models, for the model manager's list.
+/// The registered custom models, for the model manager's list. Reads the models directory
+/// directly rather than going through the engine, so this works before the engine has
+/// finished initializing - the same reason `discover_models_standalone` exists.
 #[command]
 pub async fn whisper_list_custom_models() -> Result<Vec<CustomModel>, String> {
-    let engine = require_engine()?;
-    Ok(custom_models::load(&engine.get_models_directory().await))
+    let models_dir = require_models_directory()?;
+    Ok(custom_models::load(&models_dir))
 }
 
 /// Registers a ggml file as a selectable model. Returns the full registry so the caller
@@ -555,8 +568,7 @@ pub async fn whisper_register_custom_model(
     supports_cantonese: bool,
     description: Option<String>,
 ) -> Result<Vec<CustomModel>, String> {
-    let engine = require_engine()?;
-    let models_dir = engine.get_models_directory().await;
+    let models_dir = require_models_directory()?;
 
     let model = CustomModel {
         name,
@@ -568,7 +580,7 @@ pub async fn whisper_register_custom_model(
     let registered = custom_models::add(&models_dir, model)
         .map_err(|e| format!("Failed to register model: {}", e))?;
 
-    refresh_custom_model_cache(&engine).await?;
+    refresh_custom_model_cache().await?;
     Ok(registered)
 }
 
@@ -576,13 +588,12 @@ pub async fn whisper_register_custom_model(
 /// into the models directory, and it is not Meetily's to delete.
 #[command]
 pub async fn whisper_remove_custom_model(name: String) -> Result<Vec<CustomModel>, String> {
-    let engine = require_engine()?;
-    let models_dir = engine.get_models_directory().await;
+    let models_dir = require_models_directory()?;
 
     let remaining = custom_models::remove(&models_dir, &name)
         .map_err(|e| format!("Failed to remove model: {}", e))?;
 
-    refresh_custom_model_cache(&engine).await?;
+    refresh_custom_model_cache().await?;
     Ok(remaining)
 }
 
@@ -608,18 +619,22 @@ pub async fn whisper_select_custom_model_file<R: Runtime>(
     Ok(picked.map(|path| path.to_string()))
 }
 
-fn require_engine() -> Result<Arc<WhisperEngine>, String> {
-    WHISPER_ENGINE
-        .lock()
-        .unwrap()
-        .as_ref()
-        .cloned()
-        .ok_or_else(|| "Whisper engine not initialized".to_string())
+fn require_models_directory() -> Result<PathBuf, String> {
+    get_models_directory().ok_or_else(|| "Models directory not initialized".to_string())
 }
 
 /// Re-reads the registry into the engine, so a just-registered model is selectable and
-/// decodes with its declared token without a restart.
-async fn refresh_custom_model_cache(engine: &WhisperEngine) -> Result<(), String> {
+/// decodes with its declared token without a restart. A no-op while the engine hasn't
+/// finished initializing yet - its own `discover_models` will pick up the registry the
+/// first time it runs.
+async fn refresh_custom_model_cache() -> Result<(), String> {
+    let engine = {
+        let guard = WHISPER_ENGINE.lock().unwrap();
+        guard.as_ref().cloned()
+    };
+    let Some(engine) = engine else {
+        return Ok(());
+    };
     engine
         .discover_models()
         .await
@@ -739,4 +754,70 @@ pub async fn save_script_setting(
         .write(state.db_manager.pool(), resolved)
         .await
         .map_err(|e| format!("Failed to save script setting: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::whisper_engine::ModelStatus;
+
+    /// Reproduces issue #24: a registered custom model must appear in the model manager
+    /// even when the engine hasn't initialized yet (e.g. Parakeet is the live-transcription
+    /// provider, or a caller races the startup init task) - not just once the engine path
+    /// runs discover_models().
+    #[test]
+    fn discover_models_standalone_includes_registered_custom_models() {
+        let dir = tempfile::tempdir().expect("temp models dir");
+        let model_file = dir.path().join("ggml-cantonese.bin");
+        std::fs::write(&model_file, b"not really a model").expect("write model file");
+        custom_models::add(
+            dir.path(),
+            CustomModel {
+                name: "cantonese-turbo".to_string(),
+                path: model_file,
+                engine_language: Some("yue".to_string()),
+                supports_cantonese: true,
+                description: "Cantonese fine-tune".to_string(),
+            },
+        )
+        .expect("register model");
+
+        let models = discover_models_standalone(&dir.path().to_path_buf())
+            .expect("standalone discovery succeeds");
+
+        let custom = models
+            .iter()
+            .find(|m| m.name == "cantonese-turbo")
+            .expect("registered model missing from standalone discovery");
+        assert!(matches!(custom.status, ModelStatus::Available));
+        assert!(custom.supports_cantonese);
+    }
+
+    #[test]
+    fn discover_models_standalone_labels_a_missing_custom_model() {
+        let dir = tempfile::tempdir().expect("temp models dir");
+        let model_file = dir.path().join("ggml-gone.bin");
+        std::fs::write(&model_file, b"not really a model").expect("write model file");
+        custom_models::add(
+            dir.path(),
+            CustomModel {
+                name: "gone".to_string(),
+                path: model_file.clone(),
+                engine_language: None,
+                supports_cantonese: false,
+                description: String::new(),
+            },
+        )
+        .expect("register model");
+        std::fs::remove_file(&model_file).expect("delete the registered file");
+
+        let models = discover_models_standalone(&dir.path().to_path_buf())
+            .expect("standalone discovery succeeds");
+
+        let custom = models
+            .iter()
+            .find(|m| m.name == "gone")
+            .expect("registered model missing from standalone discovery");
+        assert!(matches!(custom.status, ModelStatus::Missing));
+    }
 }

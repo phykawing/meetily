@@ -271,26 +271,7 @@ impl WhisperEngine {
             }
         }
         for custom in registered {
-            let status = if custom.path.is_file() {
-                ModelStatus::Available
-            } else {
-                log::warn!(
-                    "Custom model '{}' is registered but its file is missing: {}",
-                    custom.name,
-                    custom.path.display()
-                );
-                ModelStatus::Missing
-            };
-            models.push(ModelInfo {
-                name: custom.name.clone(),
-                size_mb: custom_models::size_mb(&custom),
-                path: custom.path,
-                accuracy: "Custom".to_string(),
-                speed: "Custom".to_string(),
-                status,
-                description: custom.description,
-                supports_cantonese: custom.supports_cantonese,
-            });
+            models.push(custom_models::to_model_info(custom));
         }
 
         // Update internal cache
