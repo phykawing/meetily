@@ -1491,4 +1491,133 @@ mod tests {
             std::fs::write(&output_path, &text).expect("write output");
         }
     }
+
+    /// Issue #32: `transcribe_audio_with_confidence`/`transcribe_audio` already request
+    /// token-level timestamps (`set_token_timestamps(true)`) alongside suppressed
+    /// timestamp tokens (`set_no_timestamps(true)`), but nothing reads them - whether the
+    /// resulting per-token `t0`/`t1` are sane under that combination was an open empirical
+    /// question. This dumps them against a real recording so that question can be
+    /// answered by inspection rather than guessed at. Findings are recorded in
+    /// docs/token-timestamp-alignment-findings.md.
+    ///
+    /// Builds its own context/params rather than going through `WhisperEngine`'s methods,
+    /// since those return only the joined final text - this needs the `WhisperState`
+    /// itself to reach `full_get_token_data`. Params otherwise mirror
+    /// `transcribe_audio_with_confidence` exactly, so this is faithful to what production
+    /// decoding actually produces, not a synthetic best case.
+    ///
+    /// ```text
+    /// MEETILY_TEST_MODEL_PATH=<ggml file> \
+    /// MEETILY_TEST_AUDIO_PATH=<audio file> \
+    ///   cargo test -p meetily --lib \
+    ///   whisper_engine::whisper_engine::tests::dump_token_level_timestamps \
+    ///   -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn dump_token_level_timestamps() {
+        let model_path = std::env::var("MEETILY_TEST_MODEL_PATH")
+            .expect("set MEETILY_TEST_MODEL_PATH to a ggml file");
+        let audio_path = std::env::var("MEETILY_TEST_AUDIO_PATH")
+            .expect("set MEETILY_TEST_AUDIO_PATH to an audio file");
+
+        let hardware_profile = crate::audio::HardwareProfile::detect();
+        let acceleration = whisper_context_acceleration_for(
+            WhisperCompiledBackend::current(),
+            hardware_profile.gpu_type,
+            hardware_profile.performance_tier,
+        );
+        let context_param = WhisperContextParameters {
+            use_gpu: acceleration.use_gpu,
+            gpu_device: acceleration.gpu_device,
+            flash_attn: acceleration.flash_attn,
+            ..Default::default()
+        };
+        let ctx = WhisperContext::new_with_params(&model_path, context_param)
+            .unwrap_or_else(|e| panic!("failed to load {model_path}: {e}"));
+
+        let decoded = crate::audio::decoder::decode_audio_file(std::path::Path::new(&audio_path))
+            .expect("decode audio file");
+        let samples = decoded.to_whisper_format();
+
+        let adaptive_config = hardware_profile.get_whisper_config();
+        let mut params = FullParams::new(SamplingStrategy::BeamSearch {
+            beam_size: adaptive_config.beam_size as i32,
+            patience: 1.0,
+        });
+        // Exactly the params transcribe_audio_with_confidence uses (see above), so this
+        // reflects real production decoding.
+        params.set_no_timestamps(true);
+        params.set_token_timestamps(true);
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        params.set_suppress_blank(true);
+        params.set_suppress_non_speech_tokens(true);
+        params.set_temperature(adaptive_config.temperature);
+        params.set_max_initial_ts(1.0);
+        params.set_entropy_thold(2.4);
+        params.set_logprob_thold(-1.0);
+        params.set_no_speech_thold(0.55);
+        params.set_max_len(200);
+        params.set_single_segment(false);
+
+        eprintln!(
+            "Transcribing {} ({:.1}s @ {}Hz, {}ch) for token-timestamp dump",
+            audio_path, decoded.duration_seconds, decoded.sample_rate, decoded.channels
+        );
+
+        let mut state = ctx.create_state().expect("create state");
+        state.full(params, &samples).expect("run inference");
+
+        let num_segments = state.full_n_segments().expect("segment count");
+        eprintln!("--- {num_segments} segments ---");
+
+        // t0/t1 are in whisper.cpp's centisecond units (same as the segment-level
+        // full_get_segment_t0/t1 this codebase already reads elsewhere), regardless of
+        // no_timestamps - that flag only suppresses *decoding* timestamp tokens, it
+        // doesn't stop whisper.cpp computing DTW/heuristic per-token timestamps.
+        let mut prev_t1: Option<i64> = None;
+        let mut total_tokens = 0usize;
+        let mut non_monotonic = 0usize;
+
+        for seg in 0..num_segments {
+            let n_tokens = state.full_n_tokens(seg).expect("token count");
+            for tok in 0..n_tokens {
+                let text = state.full_get_token_text_lossy(seg, tok).unwrap_or_default();
+                let data = match state.full_get_token_data(seg, tok) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!("seg {seg} tok {tok} '{text}' -- failed to read token data: {e}");
+                        continue;
+                    }
+                };
+                total_tokens += 1;
+
+                let ok = data.t1 >= data.t0 && prev_t1.map_or(true, |p| data.t0 >= p);
+                if !ok {
+                    non_monotonic += 1;
+                }
+                eprintln!(
+                    "seg {seg} tok {tok:3} t0={:>6} t1={:>6} p={:.3} '{}'{}",
+                    data.t0,
+                    data.t1,
+                    data.p,
+                    text,
+                    if ok { "" } else { "  <-- NON-MONOTONIC" }
+                );
+                prev_t1 = Some(data.t1);
+            }
+        }
+
+        let summary = format!(
+            "total_tokens={total_tokens} non_monotonic={non_monotonic} segments={num_segments}"
+        );
+        eprintln!("--- {summary} ---");
+
+        if let Ok(output_path) = std::env::var("MEETILY_TEST_OUTPUT_PATH") {
+            std::fs::write(&output_path, &summary).expect("write output");
+        }
+    }
 }

@@ -234,6 +234,34 @@ mod tests {
     }
 
     #[test]
+    fn token_spans_are_just_another_kind_of_chunk_span() {
+        // Issue #32: `ChunkSpan`/`align_chunks_to_turns` have no notion of "VAD chunk"
+        // beyond the name - they operate on any `(id, start, end)` span. Handed one
+        // `ChunkSpan` per Whisper token (id = token index, start/end = that token's
+        // t0/t1 in seconds) instead of one per VAD chunk, the exact same function
+        // attributes sub-chunk token runs to speaker turns with no new algorithm - see
+        // docs/token-timestamp-alignment-findings.md for the real-audio timestamp
+        // sanity check this prototype is built on.
+        let tokens = [
+            chunk("tok-0", 0.20, 0.53),  // "Why" - fully inside speaker_00's turn
+            chunk("tok-1", 0.53, 1.06),  // "are" - straddles the speaker change
+            chunk("tok-2", 1.06, 1.59),  // "you" - fully inside speaker_01's turn
+        ];
+        let turns = [turn("speaker_00", 0.0, 0.8), turn("speaker_01", 0.8, 2.0)];
+
+        let result = align_chunks_to_turns(&tokens, &turns);
+
+        assert_eq!(result[0].speaker.as_deref(), Some("speaker_00"));
+        assert!(!result[0].uncertain);
+
+        assert_eq!(result[1].speaker.as_deref(), Some("speaker_00")); // 0.27s > 0.26s
+        assert!(result[1].uncertain);
+
+        assert_eq!(result[2].speaker.as_deref(), Some("speaker_01"));
+        assert!(!result[2].uncertain);
+    }
+
+    #[test]
     fn multiple_chunks_are_attributed_independently() {
         let chunks = [chunk("c1", 0.0, 4.0), chunk("c2", 6.0, 10.0)];
         let turns = [turn("speaker_00", 0.0, 5.0), turn("speaker_01", 5.0, 10.0)];
