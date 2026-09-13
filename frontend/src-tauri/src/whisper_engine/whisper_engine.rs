@@ -1502,9 +1502,13 @@ mod tests {
     ///
     /// Builds its own context/params rather than going through `WhisperEngine`'s methods,
     /// since those return only the joined final text - this needs the `WhisperState`
-    /// itself to reach `full_get_token_data`. Params otherwise mirror
-    /// `transcribe_audio_with_confidence` exactly, so this is faithful to what production
-    /// decoding actually produces, not a synthetic best case.
+    /// itself to reach `full_get_token_data`. Params are copied from
+    /// `transcribe_audio_with_confidence` as of this writing (there is no shared
+    /// params-builder either production method calls into - they already duplicate this
+    /// block between themselves), so this reflected real production decoding at the time
+    /// the findings note was written, not a synthetic best case. Being `#[ignore]`'d, nothing
+    /// re-runs this automatically if those params are tuned later - re-diff against
+    /// `transcribe_audio_with_confidence` before trusting a re-run's results.
     ///
     /// ```text
     /// MEETILY_TEST_MODEL_PATH=<ggml file> \

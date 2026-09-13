@@ -73,6 +73,13 @@ impl DiarizationAutoRun {
         <Self as SettingToken>::as_token(self)
     }
 
+    /// Resolves a stored token into a value. Unrecognized or absent values fall back to
+    /// `Enabled` (the default), matching `DiarizationConsent::from_stored` and
+    /// `ScriptSetting::from_stored`'s convention of a named wrapper over `from_token`.
+    pub fn from_stored(token: Option<&str>) -> Self {
+        <Self as SettingToken>::from_token(token)
+    }
+
     pub fn is_enabled(self) -> bool {
         self == DiarizationAutoRun::Enabled
     }
@@ -115,7 +122,7 @@ mod tests {
     fn auto_run_round_trips_through_stored_tokens() {
         for auto_run in [DiarizationAutoRun::Enabled, DiarizationAutoRun::Disabled] {
             assert_eq!(
-                DiarizationAutoRun::from_token(Some(auto_run.as_str())),
+                DiarizationAutoRun::from_stored(Some(auto_run.as_str())),
                 auto_run
             );
         }
@@ -123,9 +130,9 @@ mod tests {
 
     #[test]
     fn auto_run_unset_or_unrecognized_tokens_default_to_enabled() {
-        assert_eq!(DiarizationAutoRun::from_token(None), DiarizationAutoRun::Enabled);
+        assert_eq!(DiarizationAutoRun::from_stored(None), DiarizationAutoRun::Enabled);
         assert_eq!(
-            DiarizationAutoRun::from_token(Some("garbage")),
+            DiarizationAutoRun::from_stored(Some("garbage")),
             DiarizationAutoRun::Enabled
         );
         assert!(DiarizationAutoRun::default().is_enabled());

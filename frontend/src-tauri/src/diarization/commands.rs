@@ -83,10 +83,11 @@ pub async fn diarization_model_status(
         .read(state.db_manager.pool())
         .await
         .map_err(|e| format!("Failed to get diarization consent: {}", e))?;
-    let auto_run: DiarizationAutoRun = setting_store::DIARIZATION_AUTO_RUN
-        .read(state.db_manager.pool())
-        .await
-        .map_err(|e| format!("Failed to get diarization auto-run setting: {}", e))?;
+    // read_or_default, not read: this is a cosmetic display toggle, not a security-
+    // critical gate like consent above - a transient settings-read failure here must not
+    // fail the whole status call and hide the entire Speaker Detection section over it.
+    let auto_run: DiarizationAutoRun =
+        setting_store::DIARIZATION_AUTO_RUN.read_or_default(state.db_manager.pool()).await;
     let base_dir = base_models_dir(&app)?;
 
     let statuses = manager::model_statuses(&base_dir);
@@ -138,8 +139,23 @@ pub async fn set_diarization_auto_run(
 /// existing "consent granted, not yet downloaded" state the UI already handles
 /// (phykawing/meetily#31). A missing directory (nothing was ever downloaded) is not an
 /// error.
+///
+/// Refuses to run while a download or a diarization pass is in flight - `remove_dir_all`
+/// is not atomic, so racing it against sherpa-onnx reading these same files mid-pass (or
+/// against an in-progress download writing them) could partially delete the directory or
+/// surface as an opaque I/O error in whichever operation loses the race.
 #[command]
 pub async fn delete_diarization_models(app: AppHandle) -> Result<(), String> {
+    if DOWNLOAD_IN_PROGRESS.load(Ordering::SeqCst) {
+        return Err("A diarization model download is in progress".to_string());
+    }
+    if pipeline::is_diarization_in_progress() {
+        return Err(
+            "Speaker detection is running - wait for it to finish before removing models"
+                .to_string(),
+        );
+    }
+
     let base_dir = base_models_dir(&app)?;
     let dir = manager::models_dir(&base_dir);
     match tokio::fs::remove_dir_all(&dir).await {

@@ -162,6 +162,7 @@ export function SpeakerDetectionSettings() {
   }
 
   const totalSize = formatSize(status.totalSizeBytes);
+  const anyModelDownloaded = status.models.some((model) => model.downloaded);
 
   return (
     <div className="border-t pt-6">
@@ -264,6 +265,21 @@ export function SpeakerDetectionSettings() {
             className="px-3 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700"
           >
             Enable Speaker Detection
+          </button>
+        </div>
+      )}
+
+      {status.consent !== 'granted' && anyModelDownloaded && (
+        <div className="p-4 border rounded-lg bg-gray-50 mt-3">
+          <div className="text-sm text-gray-600 mb-3">
+            Speaker detection is off, but its models ({totalSize}) are still on disk.
+          </div>
+          <button
+            onClick={handleRemoveModels}
+            disabled={removingModels}
+            className="px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+          >
+            {removingModels ? 'Removing…' : `Remove Downloaded Models (${totalSize})`}
           </button>
         </div>
       )}
