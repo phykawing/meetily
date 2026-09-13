@@ -44,7 +44,7 @@ A privacy-first AI meeting assistant that captures, transcribes, and summarizes 
 
 ---
 
-> **Meetily PRO Upgrade Offer** - Meetily PRO is available for users who need enhanced accuracy, advanced exports, custom summary workflows, and team-ready features. Use coupon code **LAUNCH20** for **20% off** until the next Meetily Community Edition release. Speaker diarization is also planned for PRO in mid-June. [Explore Meetily PRO →](https://meetily.ai/pro/)
+> **Meetily PRO Upgrade Offer** - Meetily PRO is available for users who need enhanced accuracy, advanced exports, custom summary workflows, and team-ready features. Use coupon code **LAUNCH20** for **20% off** until the next Meetily Community Edition release. [Explore Meetily PRO →](https://meetily.ai/pro/)
 
 ---
 
@@ -98,6 +98,7 @@ Whether you're a defense consultant, enterprise executive, legal professional, o
 - **Real-time Transcription:** Get a live transcript of your meeting as it happens.
 - **AI-Powered Summaries:** Generate summaries of your meetings using powerful language models.
 - **Multi-Platform:** Works on macOS, Windows, and Linux.
+- **Speaker Diarization (opt-in):** Separate a meeting's transcript into speaker turns after recording, once you've granted consent to download the local diarization models (see [Speaker Diarization](#speaker-diarization) below).
 - **Open Source:** Meetily is open source and free to use.
 - **Flexible AI Provider Support:** Choose from Ollama (local), Claude, Groq, OpenRouter, or use your own OpenAI-compatible endpoint.
 
@@ -187,6 +188,26 @@ Capture microphone and system audio simultaneously with intelligent ducking and 
     <img src="docs/audio.png" width="650" style="border-radius: 10px;" alt="Device selection" />
 </p>
 
+### 🗣️ Speaker Diarization
+
+Separate a finished meeting's transcript into speaker turns, entirely on your own CPU. It's
+opt-in and off by default:
+
+- **Consent prompt**: the first time you enable it (Settings > Preferences), Meetily tells
+  you approximately how much it needs to download (~32 MB of open-source models) before
+  anything is fetched. Declining leaves recording, transcription, and summarization exactly
+  as they were — nothing is downloaded.
+- **After that**, a finished meeting is automatically passed through speaker detection when
+  you land on it straight from recording. You can also run it on demand from the transcript
+  panel's Speakers button, and turn the automatic pass off separately (leaving diarization
+  available on demand) or disable the feature entirely from Settings > Preferences at any
+  time — both revoke cleanly with no re-prompting until you turn it back on.
+- **Renaming speakers**: once a pass finishes, rename each detected speaker (e.g. "Speaker
+  1" → "Alex") from the transcript panel. Names are scoped to that meeting.
+- **Re-running discards names**: running speaker detection again for the same meeting
+  (e.g. after correcting the transcript) replaces the previous run's speakers and any names
+  you gave them — the UI warns about this before a re-run starts.
+
 ### ⚡ GPU Acceleration
 
 Built-in support for hardware acceleration across platforms:
@@ -220,15 +241,12 @@ Meetily Community Edition will remain free and open source. PRO exists for users
 
 For the community that helped Meetily grow, we are making the upgrade easier: use coupon code **LAUNCH20** for **20% off Meetily PRO** until the next Meetily Community Edition release.
 
-Speaker diarization is planned for mid-June, bringing automatic speaker separation to PRO meetings.
-
 ### Key Advantages Over Community Edition:
 
 - **Enhanced Accuracy**: Superior transcription models for professional-grade accuracy
 - **Custom Summary Templates**: Tailor summaries to your specific workflow and needs
 - **Advanced Export Options**: PDF, DOCX, and Markdown exports with formatting
 - **Auto-detect and Join Meetings**: Automatic meeting detection and joining
-- **Speaker Identification**: Distinguish between speakers automatically *(Coming Soon)*
 - **Chat with Meetings**: AI-powered meeting insights and queries *(Coming Soon)*
 - **Calendar Integration**: Seamless integration with your calendar *(Coming Soon)*
 - **Self-Hosted Deployment**: Deploy on your own infrastructure for teams

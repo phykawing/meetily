@@ -169,6 +169,9 @@ implementation modules.
 | `audio/` | Capture, device management, mixing/VAD pipeline, recording, transcription dispatch |
 | `whisper_engine/` | whisper-rs model loading, acceleration detection, parallel batch transcription |
 | `parakeet_engine/` | Alternate Parakeet STT backend |
+| `diarization/` | Speaker diarization: consent-gated model download (`consent.rs`, `manager.rs`), sherpa-onnx inference and clustering (`pipeline.rs`, docs/adr/0007), turn-to-chunk alignment (`alignment.rs`) |
+| `rendering/` | Written Form Rendering of transcripts via an LLM provider (docs/adr/0002); `commands.rs` includes the fingerprint-based cache/regenerate decision |
+| `script.rs` | Chinese script conversion (Simplified/Traditional-HK) applied to transcripts at ingest (docs/adr/0003) |
 | `summary/` | Summarization orchestration: `llm_client.rs`, `processor.rs`, `templates/`, `summary_engine/` (incl. `sidecar.rs` → `llama-helper`) |
 | `ollama/`, `anthropic/`, `openai/`, `groq/`, `openrouter/` | Per-provider LLM clients |
 | `database/` | sqlx/SQLite: `manager.rs` (pool + migrations), `repositories/` (meeting, transcript, transcript_chunk, summary, setting) |

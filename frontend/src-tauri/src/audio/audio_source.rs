@@ -2,8 +2,9 @@
 //
 // The live "Audio Source" hint (see docs/adr/0001, docs/adr/0004): a cheap tag derived
 // from mixer energy dominance while recording, tagging which capture stream a live
-// transcript segment most likely came from. Distinct from the future diarized "Speaker"
-// concept, which identifies a human voice rather than a capture stream.
+// transcript segment most likely came from. Distinct from the diarized "Speaker" concept
+// (`crate::diarization`), which identifies a human voice from a post-meeting pass rather
+// than a capture stream judged live.
 
 /// Which capture stream dominated a transcript segment's mixed audio.
 ///
