@@ -14,6 +14,7 @@ import {
   readCachedDetectedSummaryLanguage,
   readMeetingTranscriptionLanguage,
 } from '@/lib/summary-language-preferences';
+import { CANTONESE_LANGUAGE_CODE } from '@/constants/languages';
 
 async function resolveSummaryLanguage(
   meetingId: string,
@@ -29,17 +30,23 @@ async function resolveSummaryLanguage(
     });
   }
 
-  try {
-    const cachedDetected = await readCachedDetectedSummaryLanguage(meetingId);
-    if (cachedDetected) return cachedDetected;
-  } catch (err) {
-    console.warn('Failed to load cached detected summary language:', err);
-  }
-
   // Consult the Transcription Language this meeting was actually recorded/imported/
   // retranscribed with, when known — a Cantonese meeting forces Traditional Chinese
   // regardless of what script the stored transcript happens to be in (phykawing/meetily#14).
   const transcriptionLanguage = await readMeetingTranscriptionLanguage(meetingId);
+
+  // A known Cantonese Transcription Language must win over a cached detection: a meeting
+  // summarised before the yue -> Traditional Chinese rule existed can hold a stale cached
+  // "zh", which would otherwise be trusted here and never reach that rule below
+  // (phykawing/meetily#26).
+  if (transcriptionLanguage !== CANTONESE_LANGUAGE_CODE) {
+    try {
+      const cachedDetected = await readCachedDetectedSummaryLanguage(meetingId);
+      if (cachedDetected) return cachedDetected;
+    } catch (err) {
+      console.warn('Failed to load cached detected summary language:', err);
+    }
+  }
 
   try {
     const detection = await detectAndCacheSummaryLanguage(

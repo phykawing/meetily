@@ -67,6 +67,22 @@ static S2T: Lazy<OpenCC> = Lazy::new(|| {
     OpenCC::from_config(BuiltinConfig::S2t).expect("embedded s2t OpenCC config failed to load")
 });
 
+/// Whether `language` (a Whisper transcription-language token, e.g. from
+/// `whisper_engine::language`) names a Chinese variant that script conversion should apply
+/// to. `zh` (Mandarin) and `yue` (Cantonese) are the only such tokens the UI exposes today;
+/// any other `zh-*` token a custom model might declare also counts. `None` — auto-detect,
+/// or no Transcription Language recorded — is deliberately *not* Chinese: guessing would
+/// risk rewriting a non-Chinese CJK transcript (see phykawing/meetily#25).
+pub fn is_chinese_language(language: Option<&str>) -> bool {
+    match language.map(str::trim) {
+        Some(lang) if !lang.is_empty() => {
+            let lower = lang.to_ascii_lowercase();
+            lower == "yue" || lower.starts_with("zh")
+        }
+        _ => false,
+    }
+}
+
 /// Converts `text` according to `setting`. Non-Han text (English, numbers, punctuation)
 /// passes through unchanged, since OpenCC only maps Han characters.
 pub fn convert(text: &str, setting: ScriptSetting) -> String {
@@ -173,6 +189,35 @@ mod tests {
         ] {
             assert_eq!(ScriptSetting::from_stored(Some(setting.as_str())), setting);
         }
+    }
+
+    // is_chinese_language --------------------------------------------------------
+
+    #[test]
+    fn mandarin_and_cantonese_tokens_are_chinese() {
+        assert!(is_chinese_language(Some("zh")));
+        assert!(is_chinese_language(Some("yue")));
+    }
+
+    #[test]
+    fn zh_variant_tokens_are_chinese() {
+        assert!(is_chinese_language(Some("zh-cn")));
+        assert!(is_chinese_language(Some("zh-TW")));
+    }
+
+    #[test]
+    fn other_cjk_languages_are_not_chinese() {
+        assert!(!is_chinese_language(Some("ja")));
+        assert!(!is_chinese_language(Some("ko")));
+    }
+
+    #[test]
+    fn unknown_or_auto_detected_language_is_not_chinese() {
+        assert!(!is_chinese_language(None));
+        assert!(!is_chinese_language(Some("auto")));
+        assert!(!is_chinese_language(Some("auto-translate")));
+        assert!(!is_chinese_language(Some("")));
+        assert!(!is_chinese_language(Some("   ")));
     }
 
     #[test]

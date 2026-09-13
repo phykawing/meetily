@@ -50,10 +50,22 @@ pub(crate) async fn unload_engine_after_batch(use_parakeet: bool) {
 /// Create transcript segments from transcription results, applying the Script setting so
 /// the conversion happens once here rather than on every later read (see docs/adr/0003).
 /// Each tuple is (text, start_ms, end_ms) from VAD timestamps.
+///
+/// `transcription_language` is the meeting's Transcription Language (e.g. `Some("yue")`),
+/// or `None`/auto-detect. Conversion only ever applies to a Chinese transcript
+/// (`script::is_chinese_language`) — a Japanese or Korean-hanja meeting must come through
+/// unconverted even with a non-default Script setting (see phykawing/meetily#25).
 pub(crate) fn create_transcript_segments(
     transcripts: &[(String, f64, f64)],
     script_setting: ScriptSetting,
+    transcription_language: Option<&str>,
 ) -> Vec<TranscriptSegment> {
+    let effective_setting = if script::is_chinese_language(transcription_language) {
+        script_setting
+    } else {
+        ScriptSetting::LeaveAsRecognized
+    };
+
     transcripts
         .iter()
         .map(|(text, start_ms, end_ms)| {
@@ -63,7 +75,7 @@ pub(crate) fn create_transcript_segments(
 
             TranscriptSegment {
                 id: format!("transcript-{}", Uuid::new_v4()),
-                text: script::convert(text.trim(), script_setting),
+                text: script::convert(text.trim(), effective_setting),
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 audio_start_time: Some(start_seconds),
                 audio_end_time: Some(end_seconds),
@@ -240,5 +252,47 @@ mod tests {
 
         acquired_rx.await.unwrap();
         waiter.await.unwrap();
+    }
+
+    // create_transcript_segments language gating (phykawing/meetily#25) ----------------
+
+    #[test]
+    fn chinese_language_is_converted_per_script_setting() {
+        let transcripts = vec![("开放中文转换".to_string(), 0.0, 1000.0)];
+
+        let segments =
+            create_transcript_segments(&transcripts, ScriptSetting::TraditionalHk, Some("zh"));
+        assert_eq!(segments[0].text, "開放中文轉換");
+
+        let segments =
+            create_transcript_segments(&transcripts, ScriptSetting::TraditionalHk, Some("yue"));
+        assert_eq!(segments[0].text, "開放中文轉換");
+    }
+
+    #[test]
+    fn non_chinese_cjk_language_is_left_unconverted() {
+        // Shinjitai forms that S2HK would otherwise rewrite into Traditional Chinese
+        // (学->學, 読->讀) if conversion were not gated on language.
+        let transcripts = vec![("学校で本を読む".to_string(), 0.0, 1000.0)];
+
+        let segments =
+            create_transcript_segments(&transcripts, ScriptSetting::TraditionalHk, Some("ja"));
+        assert_eq!(segments[0].text, "学校で本を読む");
+    }
+
+    #[test]
+    fn unknown_or_auto_detected_language_is_left_unconverted() {
+        let transcripts = vec![("开放中文转换".to_string(), 0.0, 1000.0)];
+
+        let segments =
+            create_transcript_segments(&transcripts, ScriptSetting::TraditionalHk, None);
+        assert_eq!(segments[0].text, "开放中文转换");
+
+        let segments = create_transcript_segments(
+            &transcripts,
+            ScriptSetting::TraditionalHk,
+            Some("auto"),
+        );
+        assert_eq!(segments[0].text, "开放中文转换");
     }
 }

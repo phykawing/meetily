@@ -639,8 +639,10 @@ async fn run_import<R: Runtime>(
         .read_or_default(app_state.db_manager.pool())
         .await;
 
-    // Create transcript segments, converting script once here (see docs/adr/0003)
-    let segments = create_transcript_segments(&all_transcripts, script_setting);
+    // Create transcript segments, converting script once here (see docs/adr/0003), gated
+    // on the transcription language so a non-Chinese CJK import is never rewritten
+    // (see phykawing/meetily#25)
+    let segments = create_transcript_segments(&all_transcripts, script_setting, language.as_deref());
 
     let meeting_id = create_meeting_with_transcripts(
         app_state.db_manager.pool(),
@@ -1041,14 +1043,16 @@ mod tests {
     #[test]
     fn test_create_transcript_segments_empty() {
         let transcripts: Vec<(String, f64, f64)> = vec![];
-        let segments = create_transcript_segments(&transcripts, ScriptSetting::LeaveAsRecognized);
+        let segments =
+            create_transcript_segments(&transcripts, ScriptSetting::LeaveAsRecognized, Some("zh"));
         assert!(segments.is_empty());
     }
 
     #[test]
     fn test_create_transcript_segments_single() {
         let transcripts = vec![("Hello world".to_string(), 0.0, 1500.0)];
-        let segments = create_transcript_segments(&transcripts, ScriptSetting::LeaveAsRecognized);
+        let segments =
+            create_transcript_segments(&transcripts, ScriptSetting::LeaveAsRecognized, Some("en"));
 
         assert_eq!(segments.len(), 1);
         assert_eq!(segments[0].text, "Hello world");
@@ -1059,10 +1063,12 @@ mod tests {
     #[test]
     fn test_create_transcript_segments_applies_script_setting() {
         let transcripts = vec![("开放中文转换".to_string(), 0.0, 1000.0)];
-        let segments = create_transcript_segments(&transcripts, ScriptSetting::TraditionalHk);
+        let segments =
+            create_transcript_segments(&transcripts, ScriptSetting::TraditionalHk, Some("zh"));
         assert_eq!(segments[0].text, "開放中文轉換");
 
-        let segments = create_transcript_segments(&transcripts, ScriptSetting::LeaveAsRecognized);
+        let segments =
+            create_transcript_segments(&transcripts, ScriptSetting::LeaveAsRecognized, Some("zh"));
         assert_eq!(segments[0].text, "开放中文转换");
     }
 

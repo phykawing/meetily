@@ -39,15 +39,19 @@ impl RenderingRepository {
     ///
     /// `audio_start_time` is nullable (added by a later migration, with no backfill for
     /// rows that predate it), and SQLite sorts NULL before any real value in `ASC` order —
-    /// so segments without timing are ordered first, not last, before `id` as the
-    /// tie-breaker for a stable order among them.
+    /// so segments without timing are ordered first, not last, before `rowid` as the
+    /// tie-breaker for a stable order among them. `rowid` (not the app-assigned `id`, a
+    /// random UUID) is used so the tie-break falls back to insertion order rather than
+    /// scrambling ties — this matters most for a meeting whose segments *all* lack timing
+    /// (every row predates the column), where `id ASC` would otherwise sort the entire
+    /// transcript into random order.
     pub async fn get_canonical_segments(
         pool: &SqlitePool,
         meeting_id: &str,
     ) -> Result<Vec<String>, SqlxError> {
         let rows: Vec<(String,)> = sqlx::query_as(
             "SELECT transcript FROM transcripts WHERE meeting_id = ? \
-             ORDER BY (audio_start_time IS NULL) ASC, audio_start_time ASC, id ASC",
+             ORDER BY (audio_start_time IS NULL) ASC, audio_start_time ASC, rowid ASC",
         )
         .bind(meeting_id)
         .fetch_all(pool)
@@ -224,6 +228,58 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(segments, vec!["first", "second", "untimed"]);
+    }
+
+    /// When every segment in a meeting lacks `audio_start_time` (e.g. a meeting that
+    /// entirely predates the column), the tie-break must fall back to insertion order via
+    /// `rowid`, not to the app-assigned `id` (a random UUID in production) — otherwise the
+    /// whole transcript would sort into effectively random order. `id` is deliberately
+    /// assigned here in reverse-alphabetical order so the test would fail if the query
+    /// still tie-broke on `id ASC`.
+    #[tokio::test]
+    async fn canonical_segments_all_untimed_preserve_insertion_order() {
+        let pool = migrated_pool().await;
+        let meeting_id = TranscriptsRepository::save_transcript(
+            &pool,
+            "Test meeting",
+            &[
+                TranscriptSegment {
+                    id: "zzz-first".to_string(),
+                    text: "first".to_string(),
+                    timestamp: "0".to_string(),
+                    audio_start_time: None,
+                    audio_end_time: None,
+                    duration: None,
+                    audio_source: None,
+                },
+                TranscriptSegment {
+                    id: "mmm-second".to_string(),
+                    text: "second".to_string(),
+                    timestamp: "1".to_string(),
+                    audio_start_time: None,
+                    audio_end_time: None,
+                    duration: None,
+                    audio_source: None,
+                },
+                TranscriptSegment {
+                    id: "aaa-third".to_string(),
+                    text: "third".to_string(),
+                    timestamp: "2".to_string(),
+                    audio_start_time: None,
+                    audio_end_time: None,
+                    duration: None,
+                    audio_source: None,
+                },
+            ],
+            None,
+        )
+        .await
+        .unwrap();
+
+        let segments = RenderingRepository::get_canonical_segments(&pool, &meeting_id)
+            .await
+            .unwrap();
+        assert_eq!(segments, vec!["first", "second", "third"]);
     }
 
     #[tokio::test]

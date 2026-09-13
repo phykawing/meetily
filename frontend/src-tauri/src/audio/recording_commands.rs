@@ -281,8 +281,9 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // both the metadata write below and the transcription task, so the two can never
     // diverge if the user changes the setting mid-startup (see docs/adr/0003).
     let script_setting = resolve_script_setting(&app).await;
+    let transcription_language = known_transcription_language();
     manager.set_script_setting(script_setting.as_str());
-    manager.set_transcription_language(known_transcription_language().as_deref());
+    manager.set_transcription_language(transcription_language.as_deref());
 
     // Set up error callback
     let app_for_error = app.clone();
@@ -309,7 +310,12 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     reset_speech_detected_flag(); // Reset for new recording session
 
     // Start optimized parallel transcription task and store handle
-    let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver, script_setting);
+    let task_handle = transcription::start_transcription_task(
+        app.clone(),
+        transcription_receiver,
+        script_setting,
+        transcription_language,
+    );
     {
         let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
         *global_task = Some(task_handle);
@@ -461,8 +467,9 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // both the metadata write below and the transcription task, so the two can never
     // diverge if the user changes the setting mid-startup (see docs/adr/0003).
     let script_setting = resolve_script_setting(&app).await;
+    let transcription_language = known_transcription_language();
     manager.set_script_setting(script_setting.as_str());
-    manager.set_transcription_language(known_transcription_language().as_deref());
+    manager.set_transcription_language(transcription_language.as_deref());
 
     // Set up error callback
     let app_for_error = app.clone();
@@ -489,7 +496,12 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     reset_speech_detected_flag(); // Reset for new recording session
 
     // Start optimized parallel transcription task and store handle
-    let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver, script_setting);
+    let task_handle = transcription::start_transcription_task(
+        app.clone(),
+        transcription_receiver,
+        script_setting,
+        transcription_language,
+    );
     {
         let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
         *global_task = Some(task_handle);

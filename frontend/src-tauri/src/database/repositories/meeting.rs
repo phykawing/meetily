@@ -152,11 +152,20 @@ impl MeetingsRepository {
         .fetch_one(pool)
         .await?;
 
-        // Get paginated transcripts ordered by audio_start_time
+        // Ordered to match `RenderingRepository::get_canonical_segments` exactly (see
+        // phykawing/meetily#28): `audio_start_time` is nullable, and SQLite sorts NULL
+        // before any real value in `ASC` order, so untimed segments are ordered last via
+        // the `(audio_start_time IS NULL) ASC` clause, with `rowid` as the tie-breaker
+        // among them — otherwise the 口語 view and the 書面語 Rendering can disagree on
+        // sequence for any meeting mixing timed and untimed rows. `rowid` (not the
+        // app-assigned `id`, a random UUID) is used so ties fall back to insertion order
+        // instead of scrambling into random order — this matters most for a meeting whose
+        // segments *all* lack timing, where every row ties and `id ASC` would otherwise
+        // sort the whole transcript randomly.
         let transcripts = sqlx::query_as::<_, Transcript>(
             "SELECT * FROM transcripts
              WHERE meeting_id = ?
-             ORDER BY audio_start_time ASC
+             ORDER BY (audio_start_time IS NULL) ASC, audio_start_time ASC, rowid ASC
              LIMIT ? OFFSET ?"
         )
         .bind(meeting_id)
@@ -399,5 +408,124 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    /// `get_meeting_transcripts_paginated` must order segments identically to
+    /// `RenderingRepository::get_canonical_segments`, or the 口語 view and the 書面語
+    /// Rendering can present a mixed timed/untimed meeting in a different sequence (see
+    /// phykawing/meetily#28). SQLite sorts NULL first in `ASC`, so untimed segments must be
+    /// pushed after timed ones via `(audio_start_time IS NULL) ASC`, with `rowid` as the
+    /// tie-breaker among untimed rows.
+    #[tokio::test]
+    async fn paginated_transcripts_order_null_audio_start_time_after_timed_segments() {
+        let pool = migrated_pool().await;
+        let meeting_id = TranscriptsRepository::save_transcript(
+            &pool,
+            "Test meeting",
+            &[
+                TranscriptSegment {
+                    id: "seg-0".to_string(),
+                    text: "first".to_string(),
+                    timestamp: "0".to_string(),
+                    audio_start_time: Some(0.0),
+                    audio_end_time: Some(1.0),
+                    duration: Some(1.0),
+                    audio_source: None,
+                },
+                TranscriptSegment {
+                    id: "seg-1".to_string(),
+                    text: "untimed".to_string(),
+                    timestamp: "1".to_string(),
+                    audio_start_time: None,
+                    audio_end_time: None,
+                    duration: None,
+                    audio_source: None,
+                },
+                TranscriptSegment {
+                    id: "seg-2".to_string(),
+                    text: "second".to_string(),
+                    timestamp: "2".to_string(),
+                    audio_start_time: Some(1.0),
+                    audio_end_time: Some(2.0),
+                    duration: Some(1.0),
+                    audio_source: None,
+                },
+            ],
+            None,
+        )
+        .await
+        .unwrap();
+
+        let (transcripts, total) =
+            MeetingsRepository::get_meeting_transcripts_paginated(&pool, &meeting_id, 10, 0)
+                .await
+                .unwrap();
+
+        assert_eq!(total, 3);
+        let texts: Vec<&str> = transcripts.iter().map(|t| t.transcript.as_str()).collect();
+        assert_eq!(texts, vec!["first", "second", "untimed"]);
+
+        // Matches `RenderingRepository::get_canonical_segments`'s ordering for the same
+        // meeting exactly, so the two views never disagree on sequence.
+        let rendering_segments =
+            RenderingRepository::get_canonical_segments(&pool, &meeting_id)
+                .await
+                .unwrap();
+        assert_eq!(texts, rendering_segments);
+    }
+
+    /// When every segment in a meeting lacks `audio_start_time` (e.g. a meeting that
+    /// entirely predates the column), the tie-break must fall back to insertion order via
+    /// `rowid`, not to the app-assigned `id` (a random UUID in production) — otherwise the
+    /// whole transcript would sort into effectively random order. `id` is deliberately
+    /// assigned here in reverse-alphabetical order so the test would fail if the query
+    /// still tie-broke on `id ASC`.
+    #[tokio::test]
+    async fn paginated_transcripts_all_untimed_preserve_insertion_order() {
+        let pool = migrated_pool().await;
+        let meeting_id = TranscriptsRepository::save_transcript(
+            &pool,
+            "Test meeting",
+            &[
+                TranscriptSegment {
+                    id: "zzz-first".to_string(),
+                    text: "first".to_string(),
+                    timestamp: "0".to_string(),
+                    audio_start_time: None,
+                    audio_end_time: None,
+                    duration: None,
+                    audio_source: None,
+                },
+                TranscriptSegment {
+                    id: "mmm-second".to_string(),
+                    text: "second".to_string(),
+                    timestamp: "1".to_string(),
+                    audio_start_time: None,
+                    audio_end_time: None,
+                    duration: None,
+                    audio_source: None,
+                },
+                TranscriptSegment {
+                    id: "aaa-third".to_string(),
+                    text: "third".to_string(),
+                    timestamp: "2".to_string(),
+                    audio_start_time: None,
+                    audio_end_time: None,
+                    duration: None,
+                    audio_source: None,
+                },
+            ],
+            None,
+        )
+        .await
+        .unwrap();
+
+        let (transcripts, _total) =
+            MeetingsRepository::get_meeting_transcripts_paginated(&pool, &meeting_id, 10, 0)
+                .await
+                .unwrap();
+
+        let texts: Vec<&str> = transcripts.iter().map(|t| t.transcript.as_str()).collect();
+        assert_eq!(texts, vec!["first", "second", "third"]);
     }
 }

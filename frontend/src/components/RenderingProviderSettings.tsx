@@ -19,9 +19,38 @@ const PROVIDER_DISPLAY_NAMES: Record<string, string> = {
   'custom-openai': 'Custom Server (OpenAI)',
 };
 
-function displayNameForProvider(provider: string | null): string {
+export function displayNameForProvider(provider: string | null): string {
   if (!provider) return 'no summary provider configured';
   return PROVIDER_DISPLAY_NAMES[provider] || provider;
+}
+
+/** Raw provider state behind both the settings UI and `resolveRenderingProviderLabel` —
+ * fetched together since they always come from the same two Tauri commands. */
+async function fetchRenderingProviderState(): Promise<{
+  storedProvider: string;
+  summaryProvider: string | null;
+}> {
+  const [storedProvider, modelConfig] = await Promise.all([
+    invoke<string>('get_rendering_provider'),
+    invoke('api_get_model_config') as Promise<any>,
+  ]);
+  return { storedProvider, summaryProvider: modelConfig?.provider ?? null };
+}
+
+/**
+ * Resolves the display label for whichever provider will actually produce the next 書面語
+ * Rendering — "the local model" only when the resolved provider never leaves the machine,
+ * and the summary provider's name otherwise. Progress/error copy must name this rather than
+ * assuming local, since `renderingProvider = summary_provider` can point at a cloud provider
+ * (see phykawing/meetily#27; ADR-0002 — "a display toggle must never quietly upload a
+ * meeting" is honored by the explicit setting itself, but the copy must not contradict it).
+ */
+export async function resolveRenderingProviderLabel(): Promise<string> {
+  const { storedProvider, summaryProvider } = await fetchRenderingProviderState();
+
+  if (storedProvider !== 'summary_provider') return 'the local model';
+  if (summaryProvider === 'builtin-ai') return 'the local model';
+  return displayNameForProvider(summaryProvider);
 }
 
 /**
@@ -40,14 +69,11 @@ export function RenderingProviderSettings() {
   useEffect(() => {
     let cancelled = false;
 
-    Promise.all([
-      invoke<string>('get_rendering_provider'),
-      invoke('api_get_model_config') as Promise<any>,
-    ])
-      .then(([storedProvider, modelConfig]) => {
+    fetchRenderingProviderState()
+      .then(({ storedProvider, summaryProvider }) => {
         if (cancelled) return;
         if (storedProvider === 'summary_provider') setProvider('summary_provider');
-        setSummaryProvider(modelConfig?.provider ?? null);
+        setSummaryProvider(summaryProvider);
       })
       .catch((error) => {
         console.error('Failed to load rendering provider setting:', error);

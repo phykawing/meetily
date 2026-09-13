@@ -12,6 +12,7 @@ use crate::summary::processor::{
 };
 use crate::summary::templates::{self, Template};
 use crate::ollama::metadata::ModelMetadataCache;
+use crate::whisper_engine::language::CANTONESE;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -341,10 +342,14 @@ impl SummaryService {
     }
 
     /// Reads the Transcription Language this meeting was recorded, imported, or
-    /// retranscribed with, when known (see phykawing/meetily#14) — consulted so a
-    /// Cantonese meeting still forces a Traditional Chinese summary even when no cached
-    /// `detected_summary_language` exists yet (e.g. summary generation before the
-    /// frontend's own detection pass ever ran).
+    /// retranscribed with, when known (see phykawing/meetily#14). Feeds
+    /// `detect_summary_language_from_text`, which — via `resolve_summary_language` — forces
+    /// Traditional Chinese for a Cantonese Transcription Language; `process_transcript_background`
+    /// also consults it directly to decide whether a cached `detected_summary_language` needs
+    /// re-resolving (see phykawing/meetily#26). It does not by itself set the summary's output
+    /// language: `detected_summary_language` only chooses between `ReturnEnglish` and
+    /// `NormalizeEnglish` in `resolve_final_language_action`; the output language comes solely
+    /// from `summary_language`, resolved by the caller before this function runs.
     async fn read_known_transcription_language(pool: &SqlitePool, meeting_id: &str) -> Option<String> {
         let meeting = match MeetingsRepository::get_meeting_metadata(pool, meeting_id).await {
             Ok(Some(meeting)) => meeting,
@@ -363,6 +368,18 @@ impl SummaryService {
                 None
             }
         }
+    }
+
+    /// Whether a cached `detected_summary_language` must be bypassed in favor of
+    /// re-resolving from `transcription_language`.
+    ///
+    /// A known Cantonese Transcription Language forces Traditional Chinese unconditionally
+    /// (`resolve_summary_language`), regardless of what text the transcript actually
+    /// contains. A cache written before phykawing/meetily#14 landed can hold a stale generic
+    /// "zh" for such a meeting, which would otherwise win by being checked first and never
+    /// let the meeting reach that rule (phykawing/meetily#26).
+    fn cached_detection_must_be_bypassed(transcription_language: Option<&str>) -> bool {
+        transcription_language == Some(CANTONESE)
     }
 
     fn detect_summary_language_from_text(text: &str, transcription_language: Option<&str>) -> Option<String> {
@@ -497,12 +514,18 @@ impl SummaryService {
             info!("📝 Summary language preference: {}", code);
         }
 
-        let detected_summary_language = match Self::read_detected_summary_language(&pool, &meeting_id).await {
-            Some(cached) => Some(cached),
-            None => {
-                let transcription_language =
-                    Self::read_known_transcription_language(&pool, &meeting_id).await;
-                Self::detect_summary_language_from_text(&text, transcription_language.as_deref())
+        // A known Cantonese Transcription Language forces Traditional Chinese
+        // unconditionally (see `resolve_summary_language`), so it must be checked before
+        // trusting a cached `detected_summary_language` — otherwise a meeting summarised
+        // before phykawing/meetily#14 landed, holding a stale cached "zh", would never
+        // reach the yue -> zh-tw rule (phykawing/meetily#26).
+        let transcription_language = Self::read_known_transcription_language(&pool, &meeting_id).await;
+        let detected_summary_language = if Self::cached_detection_must_be_bypassed(transcription_language.as_deref()) {
+            Self::detect_summary_language_from_text(&text, transcription_language.as_deref())
+        } else {
+            match Self::read_detected_summary_language(&pool, &meeting_id).await {
+                Some(cached) => Some(cached),
+                None => Self::detect_summary_language_from_text(&text, transcription_language.as_deref()),
             }
         };
 
@@ -700,6 +723,26 @@ impl SummaryService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // cached_detection_must_be_bypassed (phykawing/meetily#26) ------------------------
+
+    #[test]
+    fn cantonese_transcription_language_bypasses_cache() {
+        assert!(SummaryService::cached_detection_must_be_bypassed(Some(
+            CANTONESE
+        )));
+    }
+
+    #[test]
+    fn non_cantonese_or_unknown_transcription_language_trusts_cache() {
+        assert!(!SummaryService::cached_detection_must_be_bypassed(Some(
+            "zh"
+        )));
+        assert!(!SummaryService::cached_detection_must_be_bypassed(Some(
+            "en"
+        )));
+        assert!(!SummaryService::cached_detection_must_be_bypassed(None));
+    }
 
     #[test]
     fn test_strip_leading_title_with_body() {

@@ -51,11 +51,23 @@ pub struct TranscriptUpdate {
 /// docs/adr/0003) and passed in as a snapshot, rather than re-resolved here: model
 /// loading inside this task can take seconds, and re-reading the setting after that
 /// delay could diverge from the value already written to the meeting's metadata.json.
+///
+/// `transcription_language` is the same pre-recording snapshot of the meeting's known
+/// Transcription Language (`None` for auto-detect) used to write metadata.json. Script
+/// conversion only ever applies to a Chinese transcript (`script::is_chinese_language`),
+/// so a non-Chinese CJK live recording is never rewritten (see phykawing/meetily#25).
 pub fn start_transcription_task<R: Runtime>(
     app: AppHandle<R>,
     transcription_receiver: tokio::sync::mpsc::UnboundedReceiver<AudioChunk>,
     script_setting: ScriptSetting,
+    transcription_language: Option<String>,
 ) -> tokio::task::JoinHandle<()> {
+    let script_setting = if script::is_chinese_language(transcription_language.as_deref()) {
+        script_setting
+    } else {
+        ScriptSetting::LeaveAsRecognized
+    };
+
     tokio::spawn(async move {
         info!("🚀 Starting optimized parallel transcription task - guaranteeing zero chunk loss");
 

@@ -11,6 +11,7 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Loader2 } from 'lucide-react';
 import { fetchSpeakerNames } from '@/lib/meeting-speakers';
+import { resolveRenderingProviderLabel } from '@/components/RenderingProviderSettings';
 
 type WrittenForm = 'colloquial' | 'written';
 
@@ -135,6 +136,10 @@ export function TranscriptPanel({
   const [renderedText, setRenderedText] = useState<string | null>(null);
   const [isLoadingRendering, setIsLoadingRendering] = useState(false);
   const [renderingError, setRenderingError] = useState<string | null>(null);
+  // Which provider is actually producing the rendering (see phykawing/meetily#27) — resolved
+  // fresh at the start of each generation so the copy never claims "local" when
+  // `renderingProvider = summary_provider` points at a cloud provider.
+  const [renderingProviderLabel, setRenderingProviderLabel] = useState('the local model');
 
   // Tracks which meeting is currently being viewed, so a rendering fetch that resolves
   // after the user has already switched to a different meeting doesn't clobber that
@@ -148,6 +153,10 @@ export function TranscriptPanel({
   useEffect(() => {
     setRenderedText(null);
     setRenderingError(null);
+    // Reset to the safe default too — otherwise a fetch for the new meeting can briefly
+    // display the previous meeting's resolved provider label (e.g. a cloud provider's
+    // name) in the loading copy until `resolveRenderingProviderLabel` resolves again.
+    setRenderingProviderLabel('the local model');
 
     if (!meetingId) {
       setWrittenForm('colloquial');
@@ -175,6 +184,13 @@ export function TranscriptPanel({
     setIsLoadingRendering(true);
     setRenderingError(null);
     try {
+      resolveRenderingProviderLabel()
+        .then((label) => {
+          if (currentMeetingIdRef.current === requestedFor) setRenderingProviderLabel(label);
+        })
+        .catch((error) => {
+          console.warn('Failed to resolve rendering provider label:', error);
+        });
       const text = await invoke<string>('get_transcript_rendering', { meetingId: requestedFor });
       if (currentMeetingIdRef.current === requestedFor) {
         setRenderedText(text);
@@ -302,7 +318,7 @@ export function TranscriptPanel({
             {isLoadingRendering && (
               <div className="flex items-center gap-2 text-sm text-gray-500">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                Generating 書面語 rendering with the local model…
+                Generating 書面語 rendering with {renderingProviderLabel}…
               </div>
             )}
             {!isLoadingRendering && renderingError && (
