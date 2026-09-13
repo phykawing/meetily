@@ -1,6 +1,6 @@
 use crate::database::repositories::setting_store::{self, SettingToken};
 use crate::database::repositories::speaker::SpeakerRepository;
-use crate::diarization::consent::DiarizationConsent;
+use crate::diarization::consent::{DiarizationAutoRun, DiarizationConsent};
 use crate::diarization::manager;
 use crate::diarization::models::{total_size_bytes, DIARIZATION_MODELS};
 use crate::diarization::pipeline;
@@ -38,6 +38,8 @@ pub struct DiarizationStatusResponse {
     #[serde(rename = "totalSizeBytes")]
     total_size_bytes: u64,
     ready: bool,
+    #[serde(rename = "autoRun")]
+    auto_run: bool,
 }
 
 /// Gets the persisted diarization model-download consent state: `"not_asked"`,
@@ -81,6 +83,10 @@ pub async fn diarization_model_status(
         .read(state.db_manager.pool())
         .await
         .map_err(|e| format!("Failed to get diarization consent: {}", e))?;
+    let auto_run: DiarizationAutoRun = setting_store::DIARIZATION_AUTO_RUN
+        .read(state.db_manager.pool())
+        .await
+        .map_err(|e| format!("Failed to get diarization auto-run setting: {}", e))?;
     let base_dir = base_models_dir(&app)?;
 
     let statuses = manager::model_statuses(&base_dir);
@@ -103,7 +109,44 @@ pub async fn diarization_model_status(
         models,
         total_size_bytes: total_size_bytes(),
         ready,
+        auto_run: auto_run.is_enabled(),
     })
+}
+
+/// Sets whether the post-recording speaker-detection pass runs automatically. Independent
+/// of consent — disabling this leaves diarization available on demand via the Speakers
+/// button (phykawing/meetily#31).
+#[command]
+pub async fn set_diarization_auto_run(
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    let value = if enabled {
+        DiarizationAutoRun::Enabled
+    } else {
+        DiarizationAutoRun::Disabled
+    };
+    setting_store::DIARIZATION_AUTO_RUN
+        .write(state.db_manager.pool(), value)
+        .await
+        .map_err(|e| format!("Failed to save diarization auto-run setting: {}", e))
+}
+
+/// Deletes the downloaded diarization model files from disk to reclaim the space they
+/// use. Leaves `diarizationConsent` untouched — a subsequent `diarization_model_status`
+/// call reports `ready: false` until the models are downloaded again, matching the
+/// existing "consent granted, not yet downloaded" state the UI already handles
+/// (phykawing/meetily#31). A missing directory (nothing was ever downloaded) is not an
+/// error.
+#[command]
+pub async fn delete_diarization_models(app: AppHandle) -> Result<(), String> {
+    let base_dir = base_models_dir(&app)?;
+    let dir = manager::models_dir(&base_dir);
+    match tokio::fs::remove_dir_all(&dir).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("Failed to remove diarization models: {}", e)),
+    }
 }
 
 /// Downloads every diarization model that is not already present and valid on disk.

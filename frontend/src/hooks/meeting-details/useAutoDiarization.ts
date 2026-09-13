@@ -120,18 +120,22 @@ export function useAutoDiarization({
       set('checking');
 
       let ready = false;
+      let autoRun = true;
       try {
-        const status = await invoke<{ ready: boolean }>('diarization_model_status');
+        const status = await invoke<{ ready: boolean; autoRun: boolean }>('diarization_model_status');
         ready = status.ready;
+        autoRun = status.autoRun;
       } catch (error) {
         console.warn('auto-diarization: could not read model status', error);
         set('inactive');
         return;
       }
       if (cancelled) return;
-      if (!ready) {
-        // The common case: consent not granted / models not downloaded. Auto-summary must
-        // behave exactly as it did before this feature.
+      if (!ready || !autoRun) {
+        // The common case: consent not granted / models not downloaded. Also covers the
+        // user having opted out of the automatic pass while leaving diarization available
+        // on demand (phykawing/meetily#31). Auto-summary must behave exactly as it did
+        // before this feature.
         set('inactive');
         return;
       }

@@ -47,6 +47,43 @@ impl Default for DiarizationConsent {
     }
 }
 
+/// Whether the post-recording speaker-detection pass runs automatically
+/// (`useAutoDiarization` on the frontend) once consent is granted and models are ready.
+/// Independent of `DiarizationConsent`: this only gates the *automatic* pass — diarization
+/// stays available on demand via the Speakers button either way (see phykawing/meetily#31).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiarizationAutoRun {
+    /// Run automatically after every recording once diarization is ready. The default —
+    /// matches this feature's behaviour before the toggle existed.
+    Enabled,
+    /// Never run automatically; diarization remains available on demand.
+    Disabled,
+}
+
+impl SettingToken for DiarizationAutoRun {
+    const TOKENS: &'static [(&'static str, Self)] = &[
+        ("enabled", DiarizationAutoRun::Enabled),
+        ("disabled", DiarizationAutoRun::Disabled),
+    ];
+}
+
+impl DiarizationAutoRun {
+    /// Token stored in the database.
+    pub fn as_str(self) -> &'static str {
+        <Self as SettingToken>::as_token(self)
+    }
+
+    pub fn is_enabled(self) -> bool {
+        self == DiarizationAutoRun::Enabled
+    }
+}
+
+impl Default for DiarizationAutoRun {
+    fn default() -> Self {
+        DiarizationAutoRun::Enabled
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,5 +109,26 @@ mod tests {
             DiarizationConsent::from_stored(Some("garbage")),
             DiarizationConsent::NotAsked
         );
+    }
+
+    #[test]
+    fn auto_run_round_trips_through_stored_tokens() {
+        for auto_run in [DiarizationAutoRun::Enabled, DiarizationAutoRun::Disabled] {
+            assert_eq!(
+                DiarizationAutoRun::from_token(Some(auto_run.as_str())),
+                auto_run
+            );
+        }
+    }
+
+    #[test]
+    fn auto_run_unset_or_unrecognized_tokens_default_to_enabled() {
+        assert_eq!(DiarizationAutoRun::from_token(None), DiarizationAutoRun::Enabled);
+        assert_eq!(
+            DiarizationAutoRun::from_token(Some("garbage")),
+            DiarizationAutoRun::Enabled
+        );
+        assert!(DiarizationAutoRun::default().is_enabled());
+        assert!(!DiarizationAutoRun::Disabled.is_enabled());
     }
 }

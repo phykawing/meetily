@@ -19,6 +19,7 @@ interface DiarizationStatus {
   models: DiarizationModelStatus[];
   totalSizeBytes: number;
   ready: boolean;
+  autoRun: boolean;
 }
 
 function formatSize(bytes: number): string {
@@ -33,6 +34,7 @@ export function SpeakerDetectionSettings() {
   const [downloading, setDownloading] = useState(false);
   const [progress, setProgress] = useState<Record<string, number>>({});
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [removingModels, setRemovingModels] = useState(false);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -110,6 +112,47 @@ export function SpeakerDetectionSettings() {
     }
   };
 
+  const handleDisable = async () => {
+    try {
+      await invoke('set_diarization_consent', { consent: 'declined' });
+      await refreshStatus();
+      toast.success('Speaker detection disabled');
+    } catch (error) {
+      console.error('Failed to disable diarization:', error);
+      toast.error('Failed to disable speaker detection', {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  const handleToggleAutoRun = async (enabled: boolean) => {
+    try {
+      await invoke('set_diarization_auto_run', { enabled });
+      await refreshStatus();
+    } catch (error) {
+      console.error('Failed to save auto-run setting:', error);
+      toast.error('Failed to save your choice', {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  const handleRemoveModels = async () => {
+    setRemovingModels(true);
+    try {
+      await invoke('delete_diarization_models');
+      await refreshStatus();
+      toast.success('Speaker detection models removed');
+    } catch (error) {
+      console.error('Failed to remove diarization models:', error);
+      toast.error('Failed to remove speaker detection models', {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setRemovingModels(false);
+    }
+  };
+
   if (loading || !status) {
     return (
       <div className="border-t pt-6">
@@ -133,9 +176,35 @@ export function SpeakerDetectionSettings() {
       </p>
 
       {status.consent === 'granted' && status.ready && (
-        <div className="flex items-center gap-2 p-4 border rounded-lg bg-green-50 text-green-800 text-sm">
-          <CheckCircle2 className="h-4 w-4 flex-shrink-0" />
-          Speaker detection models are installed ({totalSize}).
+        <div className="p-4 border rounded-lg bg-green-50 space-y-3">
+          <div className="flex items-center gap-2 text-green-800 text-sm">
+            <CheckCircle2 className="h-4 w-4 flex-shrink-0" />
+            Speaker detection models are installed ({totalSize}).
+          </div>
+          <label className="flex items-center gap-2 text-sm text-gray-700">
+            <input
+              type="checkbox"
+              checked={status.autoRun}
+              onChange={(e) => handleToggleAutoRun(e.target.checked)}
+              className="h-4 w-4"
+            />
+            Run automatically after recording
+          </label>
+          <div className="flex gap-3">
+            <button
+              onClick={handleDisable}
+              className="px-3 py-2 text-sm font-medium text-red-700 bg-white border border-red-300 rounded-md hover:bg-red-50"
+            >
+              Disable Speaker Detection
+            </button>
+            <button
+              onClick={handleRemoveModels}
+              disabled={removingModels}
+              className="px-3 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50 disabled:opacity-50"
+            >
+              {removingModels ? 'Removing…' : `Remove Downloaded Models (${totalSize})`}
+            </button>
+          </div>
         </div>
       )}
 
@@ -146,12 +215,20 @@ export function SpeakerDetectionSettings() {
               ? `Download failed: ${downloadError}`
               : `Speaker detection models are not fully downloaded yet (${totalSize} total).`}
           </div>
-          <button
-            onClick={startDownload}
-            className="px-3 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700"
-          >
-            {downloadError ? 'Retry Download' : 'Download Models'}
-          </button>
+          <div className="flex gap-3">
+            <button
+              onClick={startDownload}
+              className="px-3 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700"
+            >
+              {downloadError ? 'Retry Download' : 'Download Models'}
+            </button>
+            <button
+              onClick={handleDisable}
+              className="px-3 py-2 text-sm font-medium text-red-700 bg-white border border-red-300 rounded-md hover:bg-red-50"
+            >
+              Disable Speaker Detection
+            </button>
+          </div>
         </div>
       )}
 

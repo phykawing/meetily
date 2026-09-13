@@ -204,6 +204,11 @@ pub const SCRIPT: StoredSetting = StoredSetting::new(SettingsTable::TranscriptSe
 pub const DIARIZATION_CONSENT: StoredSetting =
     StoredSetting::new(SettingsTable::Settings, "diarizationConsent");
 
+/// Whether the post-recording speaker-detection pass runs automatically. See
+/// `crate::diarization::consent::DiarizationAutoRun` and phykawing/meetily#31.
+pub const DIARIZATION_AUTO_RUN: StoredSetting =
+    StoredSetting::new(SettingsTable::Settings, "diarizationAutoRun");
+
 /// Which LLM provider performs a Written Form Rendering. See
 /// `crate::rendering::RenderingProvider` and docs/adr/0002.
 pub const RENDERING_PROVIDER: StoredSetting =
@@ -252,7 +257,7 @@ pub(crate) fn api_key_column(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::diarization::consent::DiarizationConsent;
+    use crate::diarization::consent::{DiarizationAutoRun, DiarizationConsent};
     use crate::rendering::RenderingProvider;
     use crate::script::ScriptSetting;
 
@@ -284,6 +289,21 @@ mod tests {
         assert_eq!(
             DIARIZATION_CONSENT.read::<DiarizationConsent>(&pool).await.unwrap(),
             DiarizationConsent::Granted
+        );
+    }
+
+    #[tokio::test]
+    async fn diarization_auto_run_round_trips_and_defaults() {
+        let pool = migrated_pool().await;
+        assert_eq!(
+            DIARIZATION_AUTO_RUN.read::<DiarizationAutoRun>(&pool).await.unwrap(),
+            DiarizationAutoRun::Enabled
+        );
+
+        DIARIZATION_AUTO_RUN.write(&pool, DiarizationAutoRun::Disabled).await.unwrap();
+        assert_eq!(
+            DIARIZATION_AUTO_RUN.read::<DiarizationAutoRun>(&pool).await.unwrap(),
+            DiarizationAutoRun::Disabled
         );
     }
 
