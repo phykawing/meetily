@@ -8,14 +8,34 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 1. **Frontend**: Tauri-based desktop application (Rust + Next.js + TypeScript)
 2. **Rust Backend**: Tauri commands, audio capture, transcription, storage, and summarization orchestration
-3. **Legacy Backend Archive**: the old Python/FastAPI, Docker, and standalone whisper-server backend under `backend/` is archived and unsupported
+3. **`llama-helper`**: standalone Rust sidecar binary (llama-cpp-2) for local LLM summarization
+4. **Legacy Backend Archive**: the old Python/FastAPI, Docker, and standalone whisper-server backend under `backend/` is archived and unsupported
+
+### Cargo Workspace Layout
+
+The repo root is a Cargo workspace with two members — run cargo commands from the **repo root**:
+
+| Path | Package | Notes |
+|---|---|---|
+| `frontend/src-tauri` | `meetily` (lib target `app_lib`) | the Tauri app |
+| `llama-helper` | `llama-helper` | sidecar binary, built separately and copied into `src-tauri/binaries/` |
+
+```bash
+cargo check -p meetily            # typecheck the Tauri app
+cargo test -p meetily             # Rust unit tests (many modules have #[cfg(test)])
+cargo test -p meetily audio::vad  # single test module / filter
+cargo build -p llama-helper --release --features cuda
+```
+
+Note the crate is named `meetily` but the lib is `app_lib` — that's why `RUST_LOG` filters use `app_lib::...`.
 
 ### Key Technology Stack
 - **Desktop App**: Tauri 2.x (Rust) + Next.js 14 + React 18
 - **Audio Processing**: Rust (cpal, whisper-rs, professional audio mixing)
 - **Transcription**: Whisper.cpp / whisper-rs and Parakeet paths in the Tauri app
+- **Persistence**: SQLite via `sqlx` with compile-time-embedded migrations
 - **App API Surface**: Tauri commands and events, not a separate FastAPI service
-- **LLM Integration**: Ollama (local), Claude, Groq, OpenRouter
+- **LLM Integration**: Ollama (local), `llama-helper` sidecar, Claude, OpenAI, Groq, OpenRouter
 
 ## Essential Development Commands
 
@@ -36,14 +56,49 @@ clean_build_windows.bat     # Production build
 # Manual Commands
 pnpm install                # Install dependencies
 pnpm run dev                # Next.js dev server (port 3118)
-pnpm run tauri:dev          # Full Tauri development mode
-pnpm run tauri:build        # Production build
+pnpm run tauri:dev          # Full Tauri development mode (auto-detects GPU)
+pnpm run tauri:build        # Production build (auto-detects GPU)
+pnpm run lint               # ESLint via `next lint`
 
-# GPU-Specific Builds (for testing acceleration)
+# GPU-Specific Builds (force a feature instead of auto-detecting)
 pnpm run tauri:dev:metal    # macOS Metal GPU
 pnpm run tauri:dev:cuda     # NVIDIA CUDA
 pnpm run tauri:dev:vulkan   # AMD/Intel Vulkan
-pnpm run tauri:dev:cpu      # CPU-only (no GPU)
+pnpm run tauri:dev:hipblas  # AMD ROCm
+pnpm run tauri:dev:openblas # CPU + OpenBLAS
+pnpm run tauri:dev:cpu      # CPU-only (no features)
+```
+
+**GPU auto-detection vs. the sidecar** — two different entry points, easy to confuse:
+
+- `pnpm run tauri:dev` / `tauri:build` go through `scripts/tauri-auto.js`, which runs
+  `scripts/auto-detect-gpu.js` and appends `-- --features <feature>`. This builds **only the app**,
+  not the `llama-helper` sidecar.
+- `./dev-gpu.sh` / `./build-gpu.sh` (`.bat`/`.ps1` on Windows) do the full job: detect GPU → build
+  `llama-helper` with that feature → copy the binary into `src-tauri/binaries/` with the target
+  triple suffix → then run `tauri:dev`/`tauri:build`. **Use these if you touched `llama-helper` or
+  need local LLM summarization to work.**
+- `TAURI_GPU_FEATURE=cuda` overrides detection for both paths.
+
+Detection priority: CUDA → HIPBlas (ROCm) → Vulkan → OpenBLAS → CPU. Having GPU *drivers* is not
+enough; detection requires the development SDK (see [docs/BUILDING.md](docs/BUILDING.md)).
+
+### Tests
+
+There is **no `pnpm test` script and CI does not run tests** — invoke them directly from `/frontend`.
+Note the files use two different runners:
+
+```bash
+# bun:test files — run these individually; `bun test tests/lib` would also sweep up
+# the .test.mjs file below, which is not a bun test
+bun test tests/lib/blocknote-markdown.test.ts
+bun test tests/lib/summary-language-preferences.test.js
+
+# plain node script (compiles the TS module in-process via typescript + vm)
+node tests/lib/onboarding-summary-model.test.mjs
+
+# Rust
+cargo test -p meetily                           # from repo root
 ```
 
 ### Legacy Backend Archive
@@ -56,6 +111,13 @@ The archived FastAPI service had unauthenticated, development-oriented CORS beha
 
 ### Service Endpoints
 - **Frontend Dev**: http://localhost:3118
+
+### Further Reading
+- [docs/BUILDING.md](docs/BUILDING.md) - per-OS build prerequisites and GPU SDK setup
+- [docs/GPU_ACCELERATION.md](docs/GPU_ACCELERATION.md) - acceleration feature matrix
+- [docs/architecture.md](docs/architecture.md) - system architecture overview
+- [.github/workflows/WORKFLOWS_OVERVIEW.md](.github/workflows/WORKFLOWS_OVERVIEW.md) - CI/release pipelines
+  (all build workflows are `workflow_dispatch`-triggered; there is no automatic PR test job)
 
 ## High-Level Architecture
 
@@ -96,37 +158,53 @@ Raw Audio (Mic + System)
 
 **Key Insight**: The pipeline performs **professional audio mixing** (RMS-based ducking, clipping prevention) for recording, while simultaneously applying **Voice Activity Detection (VAD)** to send only speech segments to Whisper for transcription.
 
-### Audio Device Modularization (Recently Completed)
+### Rust Module Map (`frontend/src-tauri/src/`)
 
-**Context**: The audio system was refactored from a monolithic 1028-line `core.rs` file into focused modules. See [AUDIO_MODULARIZATION_PLAN.md](AUDIO_MODULARIZATION_PLAN.md) for details.
+`lib.rs` (~790 lines) declares every module and registers all Tauri commands in one
+`generate_handler!`. Each subsystem follows the same shape: `commands.rs` (Tauri surface) +
+implementation modules.
 
-```
-audio/
-├── devices/                    # Device discovery and configuration
-│   ├── discovery.rs           # list_audio_devices, trigger_audio_permission
-│   ├── microphone.rs          # default_input_device
-│   ├── speakers.rs            # default_output_device
-│   ├── configuration.rs       # AudioDevice types, parsing
-│   └── platform/              # Platform-specific implementations
-│       ├── windows.rs         # WASAPI logic (~200 lines)
-│       ├── macos.rs           # ScreenCaptureKit logic
-│       └── linux.rs           # ALSA/PulseAudio logic
-├── capture/                   # Audio stream capture
-│   ├── microphone.rs          # Microphone capture stream
-│   ├── system.rs              # System audio capture stream
-│   └── core_audio.rs          # macOS ScreenCaptureKit integration
-├── pipeline.rs                # Audio mixing and VAD processing
-├── recording_manager.rs       # High-level recording coordination
-├── recording_commands.rs      # Tauri command interface
-└── recording_saver.rs         # Audio file writing
-```
+| Module | Responsibility |
+|---|---|
+| `audio/` | Capture, device management, mixing/VAD pipeline, recording, transcription dispatch |
+| `whisper_engine/` | whisper-rs model loading, acceleration detection, parallel batch transcription |
+| `parakeet_engine/` | Alternate Parakeet STT backend |
+| `summary/` | Summarization orchestration: `llm_client.rs`, `processor.rs`, `templates/`, `summary_engine/` (incl. `sidecar.rs` → `llama-helper`) |
+| `ollama/`, `anthropic/`, `openai/`, `groq/`, `openrouter/` | Per-provider LLM clients |
+| `database/` | sqlx/SQLite: `manager.rs` (pool + migrations), `repositories/` (meeting, transcript, transcript_chunk, summary, setting) |
+| `notifications/`, `tray.rs` | Native notifications and system tray |
+| `analytics/`, `console_utils/`, `onboarding.rs`, `api/` | Telemetry, in-app log console, first-run flow, misc commands |
 
-**When working on audio features**:
-- Device detection issues → `devices/discovery.rs` or `devices/platform/{windows,macos,linux}.rs`
-- Microphone/speaker problems → `devices/microphone.rs` or `devices/speakers.rs`
-- Audio capture issues → `capture/microphone.rs` or `capture/system.rs`
-- Mixing/processing problems → `pipeline.rs`
-- Recording workflow → `recording_manager.rs`
+**Dead code — do not treat as current architecture**: `audio_v2/` is not declared in `lib.rs` (no
+`pub mod audio_v2`), and `lib_old_complex.rs`, `audio/core-old.rs`, `audio/recording_saver_old.rs`,
+`audio/recording_commands.rs.backup` are unreferenced leftovers. Verify a module is in the `lib.rs`
+mod list before editing it.
+
+### Audio Module Routing
+
+`audio/` is large (~40 files plus `devices/`, `capture/`, `transcription/` subdirs). Route by symptom
+rather than browsing the tree:
+
+| Symptom | Where to look |
+|---|---|
+| Device enumeration / missing devices | `devices/discovery.rs`, `devices/platform/{windows,macos,linux}.rs` |
+| Default mic or speaker selection | `devices/microphone.rs`, `devices/speakers.rs`, `devices/fallback.rs` |
+| Capture stream errors | `capture/microphone.rs`, `capture/system.rs`, `capture/core_audio.rs` (macOS) |
+| Device unplugged mid-recording | `device_monitor.rs`, `device_detection.rs` |
+| Mixing, ducking, VAD | `pipeline.rs`, `vad.rs`, `ffmpeg_mixer.rs` |
+| Recording lifecycle / state | `recording_manager.rs`, `recording_state.rs`, `recording_commands.rs` |
+| File writing, crash-safety | `recording_saver.rs`, `incremental_saver.rs`, `encode.rs` |
+| Transcription backend selection | `transcription/engine.rs`, `transcription/{whisper,parakeet}_provider.rs`, `transcription/worker.rs` |
+| Importing / re-transcribing existing audio | `import.rs`, `decoder.rs`, `retranscription.rs` |
+| Bluetooth / playback-quality complaints | `playback_monitor.rs` (see [BLUETOOTH_PLAYBACK_NOTICE.md](BLUETOOTH_PLAYBACK_NOTICE.md)) |
+
+### Database and Migrations
+
+`database/manager.rs` runs `sqlx::migrate!("./migrations")` at startup, so migrations are **embedded
+at compile time** — adding a `.sql` file requires a rebuild, not just an app restart. Files are named
+`YYYYMMDDHHMMSS_description.sql` and are append-only; never edit an applied migration. The database
+lives at `<app_data_dir>/meeting_minutes.db`, and `database/commands.rs` contains legacy-path
+migration logic for DBs left over from the archived Python backend.
 
 ### Rust ↔ Frontend Communication (Tauri Architecture)
 
@@ -172,10 +250,12 @@ await listen<TranscriptUpdate>('transcript-update', (event) => {
 
 ### Whisper Model Management
 
-**Model Storage Locations**:
-- **Development**: `frontend/models/`
-- **Production (macOS)**: `~/Library/Application Support/Meetily/models/`
-- **Production (Windows)**: `%APPDATA%\Meetily\models\`
+**Model Storage Locations** — resolved in `whisper_engine.rs`, which falls back through several
+candidates rather than using one fixed path:
+- **Production**: `<app_data_dir>/models/`, where `app_data_dir` derives from the bundle identifier
+  `com.meetily.ai` (`~/Library/Application Support/com.meetily.ai/models` on macOS,
+  `%APPDATA%\com.meetily.ai\models` on Windows)
+- **Development**: `./models/` or `../models/` relative to the working directory, checked first
 
 **Model Loading** (frontend/src-tauri/src/whisper_engine/whisper_engine.rs):
 ```rust
@@ -383,18 +463,31 @@ $env:RUST_LOG="debug"; ./clean_run_windows.bat
 - **Logging Format**: Rust logs should include enough module context to diagnose app behavior
 - **Error Handling**: Rust uses `anyhow::Result`, frontend uses try-catch with user-friendly messages
 - **Naming**: Audio devices use "microphone" and "system" consistently (not "input"/"output")
-- **Git Branches**:
-  - `main`: Stable releases
-  - `fix/*`: Bug fixes
-  - `enhance/*`: Feature enhancements
-  - Current: `fix/audio-mixing` (working on audio pipeline improvements)
+- **Git Branches** (per [CONTRIBUTING.md](CONTRIBUTING.md)):
+  - `main`: production / stable releases
+  - `devtest`: development and testing branch
+  - Feature branches are cut **from `devtest`**, and PRs target `devtest` — not `main`
+- **Commits**: Conventional Commits — `<type>(<scope>): <subject>` with types
+  `feat|fix|docs|style|refactor|test|chore`
+- **Version bumps**: the release version is read from `frontend/src-tauri/tauri.conf.json`; keep
+  `frontend/package.json` and `frontend/src-tauri/Cargo.toml` in sync with it
 
 ## Key Files Reference
 
 **Core Coordination**:
-- [frontend/src-tauri/src/lib.rs](frontend/src-tauri/src/lib.rs) - Main Tauri entry point, command registration
+- [frontend/src-tauri/src/lib.rs](frontend/src-tauri/src/lib.rs) - Main Tauri entry point, module list, command registration
 - [frontend/src-tauri/src/audio/mod.rs](frontend/src-tauri/src/audio/mod.rs) - Audio module exports
-- [frontend/src-tauri/src/database/mod.rs](frontend/src-tauri/src/database/mod.rs) - Local database module
+- [frontend/src-tauri/src/database/manager.rs](frontend/src-tauri/src/database/manager.rs) - SQLite pool, DB path, migration runner
+- [frontend/src-tauri/tauri.conf.json](frontend/src-tauri/tauri.conf.json) - App version, bundle config, permissions
+
+**Summarization / LLM**:
+- [frontend/src-tauri/src/summary/service.rs](frontend/src-tauri/src/summary/service.rs) - Summary orchestration
+- [frontend/src-tauri/src/summary/summary_engine/sidecar.rs](frontend/src-tauri/src/summary/summary_engine/sidecar.rs) - `llama-helper` sidecar bridge
+- [llama-helper/src/main.rs](llama-helper/src/main.rs) - Local LLM sidecar binary
+
+**Build Tooling**:
+- [frontend/scripts/tauri-auto.js](frontend/scripts/tauri-auto.js) - GPU auto-detection wrapper for `tauri:dev`/`tauri:build`
+- [frontend/scripts/auto-detect-gpu.js](frontend/scripts/auto-detect-gpu.js) - Hardware/SDK probing logic
 
 **Audio System**:
 - [frontend/src-tauri/src/audio/recording_manager.rs](frontend/src-tauri/src/audio/recording_manager.rs) - Recording orchestration
@@ -407,3 +500,17 @@ $env:RUST_LOG="debug"; ./clean_run_windows.bat
 
 **Whisper Integration**:
 - [frontend/src-tauri/src/whisper_engine/whisper_engine.rs](frontend/src-tauri/src/whisper_engine/whisper_engine.rs) - Whisper model management and transcription
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as GitHub issues on `phykawing/meetily` (`origin`; `upstream` is `Zackriya-Solutions/meetily`), managed via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical roles use their default label strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` at the repo root and ADRs under `docs/adr/`, both created lazily. See `docs/agents/domain.md`.
