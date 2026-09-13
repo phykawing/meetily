@@ -1108,6 +1108,7 @@ mod tests {
 
         let content = std::fs::read_to_string(dir.path().join("metadata.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["script"], "traditional-hk");
         assert_eq!(parsed["transcription_language"], "yue");
     }
 
@@ -1127,6 +1128,7 @@ mod tests {
 
         let content = std::fs::read_to_string(dir.path().join("metadata.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["script"], "traditional-hk");
         assert!(parsed.get("transcription_language").is_none());
     }
 
@@ -1152,13 +1154,16 @@ mod tests {
             "meeting-123",
             1800.0,
             "audio.mp4",
-            ScriptSetting::TraditionalHk,
+            ScriptSetting::Simplified,
             None,
         )
         .unwrap();
 
         let content = std::fs::read_to_string(dir.path().join("metadata.json")).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        // Asserts the second pass's script setting won, not the first's - `script` is
+        // deliberately not "sticky" like `transcription_language`.
+        assert_eq!(parsed["script"], "simplified");
         assert!(parsed.get("transcription_language").is_none());
     }
 }

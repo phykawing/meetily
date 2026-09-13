@@ -520,3 +520,72 @@ impl Default for RecordingSaver {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `initialize_meeting_folder` resolves its base directory from
+    /// `recording_preferences::get_default_recordings_folder()`, a real filesystem
+    /// dependency that isn't controllable from a unit test. `write_metadata` is the seam
+    /// underneath it that actually produces `metadata.json` and takes a directory
+    /// directly, so tests exercise that instead - mirroring `import.rs`/
+    /// `retranscription.rs`'s equivalent metadata-write tests.
+    fn sample_metadata(script: Option<String>) -> MeetingMetadata {
+        MeetingMetadata {
+            version: "1.0".to_string(),
+            meeting_id: None,
+            meeting_name: Some("Test Meeting".to_string()),
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            completed_at: None,
+            duration_seconds: None,
+            devices: DeviceInfo { microphone: None, system_audio: None },
+            audio_file: "audio.mp4".to_string(),
+            transcript_file: "transcripts.json".to_string(),
+            sample_rate: 48000,
+            status: "recording".to_string(),
+            script,
+            transcription_language: None,
+        }
+    }
+
+    #[test]
+    fn write_metadata_records_the_script_setting() {
+        let dir = tempfile::tempdir().unwrap();
+        let saver = RecordingSaver::new();
+        let metadata = sample_metadata(Some("traditional-hk".to_string()));
+
+        saver.write_metadata(&dir.path().to_path_buf(), &metadata).unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join("metadata.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["script"], "traditional-hk");
+    }
+
+    #[test]
+    fn write_metadata_omits_script_when_none() {
+        // Matches meetings recorded before the Script field existed (see the `script`
+        // field's `skip_serializing_if` doc comment).
+        let dir = tempfile::tempdir().unwrap();
+        let saver = RecordingSaver::new();
+        let metadata = sample_metadata(None);
+
+        saver.write_metadata(&dir.path().to_path_buf(), &metadata).unwrap();
+
+        let content = std::fs::read_to_string(dir.path().join("metadata.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(parsed.get("script").is_none());
+    }
+
+    #[test]
+    fn write_metadata_writes_via_a_temp_file_and_leaves_no_temp_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let saver = RecordingSaver::new();
+        let metadata = sample_metadata(Some("simplified".to_string()));
+
+        saver.write_metadata(&dir.path().to_path_buf(), &metadata).unwrap();
+
+        assert!(dir.path().join("metadata.json").exists());
+        assert!(!dir.path().join(".metadata.json.tmp").exists());
+    }
+}

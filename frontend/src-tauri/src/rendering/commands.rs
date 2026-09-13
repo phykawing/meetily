@@ -183,6 +183,31 @@ fn resolve_chunk_size_tokens(context_size: u32) -> usize {
     generation_cap.min(half_context).max(1)
 }
 
+/// Whether a cached Rendering can be served as-is, or must be regenerated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderingCacheDecision {
+    /// The cached Rendering's fingerprint matches the transcript's current fingerprint —
+    /// nothing has changed since it was generated.
+    ServeCached,
+    /// No cached Rendering exists yet, or its fingerprint no longer matches the
+    /// transcript's current fingerprint (the Canonical Transcript changed since it was
+    /// generated).
+    Regenerate,
+}
+
+/// Decides whether `get_transcript_rendering` can serve `cached_fingerprint` as-is, or
+/// must regenerate — pulled out of the command so this decision is exercised directly by
+/// a unit test, without needing an `AppHandle` and `ModelManagerState` to construct one.
+fn decide_rendering_cache(
+    cached_fingerprint: Option<&str>,
+    current_fingerprint: &str,
+) -> RenderingCacheDecision {
+    match cached_fingerprint {
+        Some(cached) if cached == current_fingerprint => RenderingCacheDecision::ServeCached,
+        _ => RenderingCacheDecision::Regenerate,
+    }
+}
+
 /// Gets the 書面語 Rendering for a meeting, generating and caching it if the cache is
 /// missing or stale (the Canonical Transcript has changed since the cached Rendering was
 /// produced). Uses the local built-in model by default, or the configured summary provider
@@ -221,17 +246,23 @@ pub async fn get_transcript_rendering<R: Runtime>(
 
     let fingerprint = fingerprint_segments(&segments);
 
-    if let Some((rendered_text, cached_fingerprint)) = RenderingRepository::get_cached_rendering(pool, &meeting_id)
+    let cached = RenderingRepository::get_cached_rendering(pool, &meeting_id)
         .await
-        .map_err(|e| format!("Failed to read cached rendering: {}", e))?
-    {
-        if cached_fingerprint == fingerprint {
+        .map_err(|e| format!("Failed to read cached rendering: {}", e))?;
+
+    match decide_rendering_cache(cached.as_ref().map(|(_, fp)| fp.as_str()), &fingerprint) {
+        RenderingCacheDecision::ServeCached => {
+            let (rendered_text, _) = cached.expect("ServeCached implies a cached rendering exists");
             return Ok(rendered_text);
         }
-        log::info!(
-            "Cached rendering for meeting {} is stale (transcript changed); regenerating",
-            meeting_id
-        );
+        RenderingCacheDecision::Regenerate => {
+            if cached.is_some() {
+                log::info!(
+                    "Cached rendering for meeting {} is stale (transcript changed); regenerating",
+                    meeting_id
+                );
+            }
+        }
     }
 
     let rendering_provider: RenderingProvider = setting_store::RENDERING_PROVIDER
@@ -395,5 +426,28 @@ mod tests {
     #[test]
     fn remote_chunk_size_never_exceeds_the_conservative_budget_even_with_a_large_configured_max_tokens() {
         assert_eq!(resolve_remote_chunk_size_tokens(Some(100_000)), 2048 - 256);
+    }
+
+    // decide_rendering_cache -----------------------------------------------------
+
+    #[test]
+    fn no_cached_rendering_regenerates() {
+        assert_eq!(decide_rendering_cache(None, "fp-1"), RenderingCacheDecision::Regenerate);
+    }
+
+    #[test]
+    fn matching_fingerprint_serves_the_cache() {
+        assert_eq!(
+            decide_rendering_cache(Some("fp-1"), "fp-1"),
+            RenderingCacheDecision::ServeCached
+        );
+    }
+
+    #[test]
+    fn stale_fingerprint_regenerates() {
+        assert_eq!(
+            decide_rendering_cache(Some("fp-1"), "fp-2"),
+            RenderingCacheDecision::Regenerate
+        );
     }
 }

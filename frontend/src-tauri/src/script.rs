@@ -143,6 +143,24 @@ mod tests {
     }
 
     #[test]
+    fn traditional_hk_setting_uses_hk_glyph_variants_not_plain_traditional() {
+        // 說/溫/戶/臺 are genuine (e.g. Taiwan) Traditional characters that S2HK's
+        // HKVariants pass additionally rewrites to a Hong Kong glyph (説/温/户/台) - S2T
+        // (plain Simplified-to-Traditional, with no HK variants pass) leaves them alone.
+        // Every other `convert(..., TraditionalHk)` test above uses input whose S2hk and
+        // S2t output happen to be identical, so swapping `S2Hk` for `S2T` at script.rs:55
+        // would still pass them; this one pins the Hong Kong convention specifically.
+        assert_eq!(
+            convert("他說得很清楚。", ScriptSetting::TraditionalHk),
+            "他説得很清楚。"
+        );
+        assert_eq!(
+            convert("溫度戶外臺灣", ScriptSetting::TraditionalHk),
+            "温度户外台灣"
+        );
+    }
+
+    #[test]
     fn simplified_setting_converts_traditional_to_simplified() {
         assert_eq!(
             convert("開放中文轉換是完全由 Rust 實現的。", ScriptSetting::Simplified),
