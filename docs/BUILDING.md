@@ -329,4 +329,23 @@ pnpm tauri:build
 
 By default, the application will be built with CPU-only processing. To enable GPU acceleration, see the [GPU Acceleration Guide](GPU_ACCELERATION.md).
 
+### 3. Speaker diarization runtime DLLs
+
+Speaker diarization (see [docs/adr/0007](adr/0007-diarization-runtime-is-sherpa-onnx-shared-linked.md))
+links `sherpa-onnx` as a shared library, which produces four native DLLs
+(`sherpa-onnx-c-api.dll`, `sherpa-onnx-cxx-api.dll`, `onnxruntime.dll`,
+`onnxruntime_providers_shared.dll`) that must sit next to `meetily.exe` at runtime, or the
+app fails to launch entirely - not just diarization.
+
+- `cargo run` / `pnpm tauri:dev` get this for free: `frontend/src-tauri/build/sherpa.rs`
+  stages the DLLs into `src-tauri/runtime-dlls/` on every build, and `tauri.windows.conf.json`
+  lists them under `bundle.resources`, so `pnpm tauri:build`'s NSIS/MSI installer ships them
+  next to the installed executable too. No manual step is needed for either.
+- **`cargo test -p meetily` is the one path this does not cover.** A test binary lives in
+  `target/debug/deps/`, not `target/debug/` where the DLLs land, so Windows' loader falls
+  back to the system `onnxruntime.dll` (WinML, in `System32`) and any test that actually
+  runs sherpa-onnx inference crashes on an ONNX Runtime API version mismatch. This is
+  tracked separately (phykawing/meetily#43) and does not affect `diarization::alignment`'s
+  tests, which are pure and never touch sherpa-onnx.
+
 </details>

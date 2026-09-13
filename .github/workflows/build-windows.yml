@@ -688,6 +688,23 @@ jobs:
           echo "## Build Artifacts"
           find target/x86_64-pc-windows-msvc/${{ steps.build-profile.outputs.profile }}/bundle -type f \( -name "*.msi" -o -name "*.exe" \) -exec ls -lh {} \;
 
+          # Speaker diarization links sherpa-onnx shared, which needs these four DLLs next
+          # to the installed meetily.exe or the packaged app fails to launch entirely - not
+          # just diarization (see docs/adr/0007, docs/BUILDING.md "Speaker diarization
+          # runtime DLLs"). frontend/src-tauri/build/sherpa.rs stages them here before
+          # tauri_build::build() runs, and tauri.windows.conf.json's bundle.resources ships
+          # them into the installer; this just fails the build loudly if that staging step
+          # didn't run, rather than shipping a broken installer silently.
+          echo "## Diarization runtime DLLs (staged for bundling)"
+          for dll in sherpa-onnx-c-api.dll sherpa-onnx-cxx-api.dll onnxruntime.dll onnxruntime_providers_shared.dll; do
+            path="frontend/src-tauri/runtime-dlls/$dll"
+            if [ ! -f "$path" ]; then
+              echo "::error::Missing $path - the packaged installer would fail to launch (docs/adr/0007)"
+              exit 1
+            fi
+            ls -lh "$path"
+          done
+
       - name: Upload artifacts
         if: ${{ github.event.inputs.upload-artifacts == 'true' }}
         uses: actions/upload-artifact@v4
