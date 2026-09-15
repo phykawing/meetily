@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { RefreshCw, Globe, Loader2, AlertCircle, CheckCircle2, X, Cpu } from 'lucide-react';
+import { RefreshCw, Globe, Loader2, AlertCircle, AlertTriangle, CheckCircle2, X, Cpu } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -23,6 +23,7 @@ import { useConfig } from '@/contexts/ConfigContext';
 import { LANGUAGES, CANTONESE_LANGUAGE_CODE } from '@/constants/languages';
 import { useTranscriptionModels, ModelOption } from '@/hooks/useTranscriptionModels';
 import { cantoneseUnavailableReason } from '@/lib/cantonese-capability';
+import { fetchSpeakerNames } from '@/lib/meeting-speakers';
 import Analytics from '@/lib/analytics';
 
 interface RetranscribeDialogProps {
@@ -64,6 +65,10 @@ export function RetranscribeDialog({
   const [progress, setProgress] = useState<RetranscriptionProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedLang, setSelectedLang] = useState(selectedLanguage || 'auto');
+  // How many speakers this meeting currently has from a prior diarization pass. 'loading'
+  // until the count is back; 'error' if it could not be fetched — fails safe toward
+  // showing the discard warning, mirroring SpeakerDetectionDialog's same check.
+  const [existingSpeakers, setExistingSpeakers] = useState<number | 'loading' | 'error'>('loading');
 
   // Use centralized model fetching hook
   const {
@@ -85,6 +90,11 @@ export function RetranscribeDialog({
   // Track previous open state to only reset on closed→open transition
   const prevOpenRef = useRef(false);
 
+  // Whether this meeting had speaker names when retranscription was started, so the
+  // completion toast can prompt to re-run detection — captured once at start since
+  // existingSpeakers itself isn't meaningful once processing begins.
+  const hadSpeakersRef = useRef(false);
+
   // Helper to get selected model details (memoized)
   const selectedModelDetails = useMemo((): ModelOption | undefined => {
     if (!selectedModelKey) return undefined;
@@ -100,6 +110,10 @@ export function RetranscribeDialog({
     modelName: selectedModelDetails?.name,
     supportsCantonese: selectedModelDetails?.supportsCantonese,
   });
+  // 'loading' suppresses the warning (resolves quickly after open); every other state —
+  // a positive count, or a failed fetch — shows it, same fail-safe as SpeakerDetectionDialog.
+  const willDiscardSpeakers =
+    existingSpeakers === 'error' || (typeof existingSpeakers === 'number' && existingSpeakers > 0);
 
   useEffect(() => {
     if (isParakeetModel && selectedLang !== 'auto') {
@@ -141,6 +155,28 @@ export function RetranscribeDialog({
     }
   }, [open, selectedLanguage, transcriptModelConfig, fetchModels]);
 
+  // Re-transcription deletes and re-inserts transcript rows, which discards any speaker
+  // names assigned by a prior diarization pass (phykawing/meetily#36). Count them on each
+  // open so the warning below reflects a pass that finished while this dialog was closed.
+  useEffect(() => {
+    if (!open) return;
+
+    setExistingSpeakers('loading');
+    let cancelled = false;
+    fetchSpeakerNames(meetingId)
+      .then((names) => {
+        if (!cancelled) setExistingSpeakers(Object.keys(names).length);
+      })
+      .catch((error) => {
+        console.error('Failed to count existing speakers:', error);
+        if (!cancelled) setExistingSpeakers('error');
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open, meetingId]);
+
   // Listen for retranscription events
   useEffect(() => {
     if (!open) return;
@@ -179,6 +215,11 @@ export function RetranscribeDialog({
             toast.success(
               `Retranscription complete! ${event.payload.segments_count} segments created.`
             );
+            if (hadSpeakersRef.current) {
+              toast.info(
+                'Speaker names were cleared by retranscription. Re-run speaker detection to relabel this meeting.'
+              );
+            }
             onCompleteRef.current?.();
             onOpenChangeRef.current(false);
           }
@@ -228,6 +269,7 @@ export function RetranscribeDialog({
     setIsProcessing(true);
     setError(null);
     setProgress(null);
+    hadSpeakersRef.current = willDiscardSpeakers;
 
     try {
       const languageToSend = isParakeetModel ? null : selectedLang === 'auto' ? null : selectedLang;
@@ -323,6 +365,17 @@ export function RetranscribeDialog({
         </DialogHeader>
 
         <div className="space-y-4 py-4">
+          {!isProcessing && !error && willDiscardSpeakers && (
+            <div className="flex gap-2 rounded-md border border-amber-200 bg-amber-50 p-3">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+              <p className="text-sm text-amber-800">
+                This meeting&rsquo;s speaker names will be discarded. Retranscription
+                replaces the transcript with fresh rows that don&rsquo;t carry the old
+                speaker labels — you can re-run speaker detection afterward.
+              </p>
+            </div>
+          )}
+
           {!isProcessing && !error && (
             !isParakeetModel ? (
               <div className="space-y-3">
@@ -428,7 +481,11 @@ export function RetranscribeDialog({
               <Button
                 onClick={handleStartRetranscription}
                 className="bg-blue-600 hover:bg-blue-700"
-                disabled={!meetingFolderPath || (selectedLang === CANTONESE_LANGUAGE_CODE && !!cantoneseReason)}
+                disabled={
+                  !meetingFolderPath ||
+                  existingSpeakers === 'loading' ||
+                  (selectedLang === CANTONESE_LANGUAGE_CODE && !!cantoneseReason)
+                }
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
                 Start Retranscription
