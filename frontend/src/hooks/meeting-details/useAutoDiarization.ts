@@ -2,6 +2,11 @@ import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
+import {
+  autoDiarizationWaitState,
+  classifyAutoDiarizationStartError,
+  shouldRunAutoDiarization,
+} from '@/lib/auto-diarization';
 
 /**
  * Runs the post-meeting speaker-detection pass automatically when the user lands on a
@@ -92,16 +97,22 @@ export function useAutoDiarization({
       );
       if (cancelled) return;
 
+      const waitState = autoDiarizationWaitState(meetingId, metadataLoaded, meetingFolderPath);
       // Still loading - no id, or metadata not back yet. Stay in 'checking' (keeps
       // blocking) and let the effect re-run when it arrives, rather than briefly
       // unblocking and letting the summary slip through.
-      if (!meetingId || !metadataLoaded) {
+      if (waitState === 'wait') {
         return;
       }
       // Metadata is loaded and there is still no folder path: this meeting has no saved
       // audio to diarize. Nothing to wait on - let the summary through.
-      if (!meetingFolderPath) {
+      if (waitState === 'no-audio') {
         set('inactive');
+        return;
+      }
+      if (!meetingId) {
+        // Unreachable: `waitState` is only 'proceed' when `meetingId` is truthy. Narrows
+        // the type for the rest of this closure without duplicating that check's logic.
         return;
       }
 
@@ -131,7 +142,7 @@ export function useAutoDiarization({
         return;
       }
       if (cancelled) return;
-      if (!ready || !autoRun) {
+      if (!shouldRunAutoDiarization({ ready, autoRun })) {
         // The common case: consent not granted / models not downloaded. Also covers the
         // user having opted out of the automatic pass while leaving diarization available
         // on demand (phykawing/meetily#31). Auto-summary must behave exactly as it did
@@ -146,7 +157,7 @@ export function useAutoDiarization({
         started.add(meetingId);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        if (/already (running|in progress)/i.test(message)) {
+        if (classifyAutoDiarizationStartError(message) === 'lock-held') {
           // The pass is single-flight process-wide (diarization::pipeline), and this
           // rejection does not say whose pass holds the lock. It is almost certainly
           // *another* meeting's - a freshly-recorded meeting's own pass has not started
