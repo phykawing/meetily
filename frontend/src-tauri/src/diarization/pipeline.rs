@@ -14,7 +14,7 @@
 use crate::audio::decoder::decode_audio_file;
 use crate::audio::retranscription::find_audio_file;
 use crate::database::repositories::speaker::{SpeakerName, SpeakerRepository};
-use crate::diarization::alignment::{align_chunks_to_turns, SpeakerTurn};
+use crate::diarization::alignment::{align_chunks_to_turns, ChunkAttribution, SpeakerTurn};
 use crate::diarization::manager;
 use crate::diarization::models::{EMBEDDING_MODEL, SEGMENTATION_MODEL};
 use anyhow::{anyhow, Result};
@@ -194,6 +194,17 @@ async fn run_diarization_inner<R: Runtime>(
     base_models_dir: &Path,
     expected_speakers: Option<u32>,
 ) -> Result<DiarizationResult> {
+    // Checked first, before decoding audio or running any inference: a meeting whose
+    // transcript rows all predate `audio_start_time`/`audio_end_time` has no chunk a
+    // Speaker Turn could ever be aligned to, so there is no point spending CPU time on a
+    // pass that is guaranteed to attribute nothing (see phykawing/meetily#34 item 5).
+    let chunks = SpeakerRepository::get_chunk_spans(pool, meeting_id).await?;
+    if chunks.is_empty() {
+        return Err(anyhow!(
+            "This meeting's transcript predates audio timing and can't be attributed to speakers"
+        ));
+    }
+
     emit_progress(app, meeting_id, "locating", 5, "Locating meeting audio...");
     let folder_path = PathBuf::from(meeting_folder_path);
     let audio_path = find_audio_file(&folder_path)?;
@@ -244,9 +255,8 @@ async fn run_diarization_inner<R: Runtime>(
         })
         .collect();
 
-    let chunks = SpeakerRepository::get_chunk_spans(pool, meeting_id).await?;
     let attributions = align_chunks_to_turns(&chunks, &turns);
-    let speaker_names = default_speaker_names(&turns);
+    let speaker_names = speaker_names_for(&attributions, default_speaker_names(&turns));
     let num_flagged = attributions.iter().filter(|a| a.uncertain).count();
 
     emit_progress(app, meeting_id, "saving", 90, "Saving speaker labels...");
@@ -289,6 +299,26 @@ fn default_speaker_names(turns: &[SpeakerTurn]) -> Vec<SpeakerName> {
         }
     }
     names
+}
+
+/// Filters `all_names` (every speaker `default_speaker_names` numbered from `turns`) down
+/// to only the speakers actually attributed to at least one chunk, and renumbers the kept
+/// ones contiguously from 1 (in the same first-appearance order `default_speaker_names`
+/// already produced). Diarization can find turns that end up overlapping no transcript
+/// chunk at all (a mismatch between the audio timeline and the chunks'
+/// `audio_start_time`/`audio_end_time`); without the filter that still writes a populated
+/// `meeting_speakers` list for a meeting where no transcript row carries any of those
+/// labels (phykawing/meetily#34 item 5), and without the renumbering a filtered-out middle
+/// speaker would leave a visible gap ("Speaker 1", "Speaker 3", no "Speaker 2").
+fn speaker_names_for(attributions: &[ChunkAttribution], all_names: Vec<SpeakerName>) -> Vec<SpeakerName> {
+    let attributed: std::collections::HashSet<&str> =
+        attributions.iter().filter_map(|a| a.speaker.as_deref()).collect();
+    all_names
+        .into_iter()
+        .filter(|n| attributed.contains(n.label.as_str()))
+        .enumerate()
+        .map(|(i, n)| SpeakerName { label: n.label, name: format!("Speaker {}", i + 1) })
+        .collect()
 }
 
 /// Clustering merge threshold, empirically raised from the sherpa-onnx crate's own
@@ -429,5 +459,73 @@ mod tests {
         let names = default_speaker_names(&turns);
         assert_eq!(names.len(), 1);
         assert_eq!(names[0].name, "Speaker 1");
+    }
+
+    fn attribution(chunk_id: &str, speaker: Option<&str>, uncertain: bool) -> ChunkAttribution {
+        ChunkAttribution {
+            chunk_id: chunk_id.to_string(),
+            speaker: speaker.map(str::to_string),
+            uncertain,
+        }
+    }
+
+    #[test]
+    fn speaker_names_for_keeps_only_speakers_attributed_to_at_least_one_chunk() {
+        let names = vec![
+            SpeakerName { label: "speaker_00".to_string(), name: "Speaker 1".to_string() },
+            SpeakerName { label: "speaker_01".to_string(), name: "Speaker 2".to_string() },
+        ];
+        let attributions = [
+            attribution("c1", Some("speaker_00"), false),
+            attribution("c2", None, false),
+        ];
+
+        let kept = speaker_names_for(&attributions, names);
+
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].label, "speaker_00");
+    }
+
+    /// The scenario from phykawing/meetily#34 item 5: turns were found (so
+    /// `default_speaker_names` is non-empty) but no chunk ended up attributed to any of
+    /// them — the fix is that `meeting_speakers` ends up empty too, not populated with
+    /// names no transcript row will ever display.
+    #[test]
+    fn speaker_names_for_is_empty_when_no_chunk_was_attributed() {
+        let names = vec![SpeakerName { label: "speaker_00".to_string(), name: "Speaker 1".to_string() }];
+        let attributions = [attribution("c1", None, false)];
+
+        assert!(speaker_names_for(&attributions, names).is_empty());
+    }
+
+    #[test]
+    fn speaker_names_for_with_no_attributions_at_all_is_empty() {
+        let names = vec![SpeakerName { label: "speaker_00".to_string(), name: "Speaker 1".to_string() }];
+        assert!(speaker_names_for(&[], names).is_empty());
+    }
+
+    /// A filtered-out middle speaker must not leave a gap in the displayed numbering -
+    /// "Speaker 1", "Speaker 3" with no "Speaker 2" would look like a bug to end users even
+    /// though the filtering itself is intentional (surfaced by review of #34's item 5 fix).
+    #[test]
+    fn speaker_names_for_renumbers_contiguously_after_filtering_a_middle_speaker() {
+        let names = vec![
+            SpeakerName { label: "speaker_00".to_string(), name: "Speaker 1".to_string() },
+            SpeakerName { label: "speaker_01".to_string(), name: "Speaker 2".to_string() },
+            SpeakerName { label: "speaker_02".to_string(), name: "Speaker 3".to_string() },
+        ];
+        // speaker_01 (the middle speaker) never got attributed to any chunk.
+        let attributions = [
+            attribution("c1", Some("speaker_00"), false),
+            attribution("c2", Some("speaker_02"), false),
+        ];
+
+        let kept = speaker_names_for(&attributions, names);
+
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].label, "speaker_00");
+        assert_eq!(kept[0].name, "Speaker 1");
+        assert_eq!(kept[1].label, "speaker_02");
+        assert_eq!(kept[1].name, "Speaker 2");
     }
 }

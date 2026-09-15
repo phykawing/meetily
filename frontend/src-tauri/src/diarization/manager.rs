@@ -10,10 +10,48 @@
 
 use super::models::{DiarizationModel, DIARIZATION_MODELS};
 use anyhow::{anyhow, Result};
+use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+
+/// Lowercase-hex SHA-256 of the file at `path`, streamed in fixed-size chunks so hashing a
+/// tens-of-MB model never holds the whole file in memory at once.
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| anyhow!("Failed to open {} for checksum: {}", path.display(), e))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 1 << 16];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| anyhow!("Failed reading {} for checksum: {}", path.display(), e))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Verifies that the file at `path` matches `model`'s expected SHA-256. A downloaded file
+/// can clear the `min_valid_bytes` size check while still being truncated mid-content or
+/// tampered with in flight; this is the actual integrity check, run once against a freshly
+/// completed download before it is trusted (see `download_model`).
+fn verify_checksum(path: &Path, model: &DiarizationModel) -> Result<()> {
+    let actual = sha256_file(path)?;
+    if !actual.eq_ignore_ascii_case(model.sha256) {
+        return Err(anyhow!(
+            "Checksum mismatch for {}: expected {}, got {}",
+            model.display_name,
+            model.sha256,
+            actual
+        ));
+    }
+    Ok(())
+}
 
 /// Whether a model's on-disk file is present and large enough to trust. A file smaller
 /// than `min_valid_bytes` is treated as missing (partial/failed download), so a retry
@@ -146,6 +184,16 @@ pub async fn download_model(
         ));
     }
 
+    let checksum_path = tmp_path.clone();
+    let checksum_model = *model;
+    let checksum_result = tokio::task::spawn_blocking(move || verify_checksum(&checksum_path, &checksum_model))
+        .await
+        .map_err(|e| anyhow!("Checksum task panicked for {}: {}", model.display_name, e))?;
+    if let Err(e) = checksum_result {
+        let _ = fs::remove_file(&tmp_path).await;
+        return Err(e);
+    }
+
     fs::rename(&tmp_path, path)
         .await
         .map_err(|e| anyhow!("Failed to finalize download of {}: {}", model.display_name, e))?;
@@ -158,6 +206,11 @@ mod tests {
     use super::*;
     use crate::diarization::models::DiarizationModel;
 
+    // sha256("hello world"), computed independently via `sha256sum` for this test only —
+    // the fixture content in `checksum_matches_a_correctly_downloaded_file` below.
+    const HELLO_WORLD_SHA256: &str =
+        "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
+
     const TEST_MODEL: DiarizationModel = DiarizationModel {
         id: "test",
         display_name: "Test Model",
@@ -165,6 +218,7 @@ mod tests {
         filename: "test-model.onnx",
         size_bytes: 100,
         min_valid_bytes: 50,
+        sha256: HELLO_WORLD_SHA256,
         license: "MIT",
     };
 
@@ -219,5 +273,33 @@ mod tests {
         let statuses = model_statuses(dir.path());
         assert_eq!(statuses.len(), DIARIZATION_MODELS.len());
         assert!(statuses.iter().all(|(_, downloaded)| !downloaded));
+    }
+
+    #[test]
+    fn sha256_file_matches_a_known_vector() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("hello.txt");
+        std::fs::write(&path, b"hello world").unwrap();
+        assert_eq!(sha256_file(&path).unwrap(), HELLO_WORLD_SHA256);
+    }
+
+    #[test]
+    fn verify_checksum_accepts_a_file_matching_the_manifest_hash() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(TEST_MODEL.filename);
+        std::fs::write(&path, b"hello world").unwrap();
+        assert!(verify_checksum(&path, &TEST_MODEL).is_ok());
+    }
+
+    #[test]
+    fn verify_checksum_rejects_a_file_that_is_the_right_size_but_wrong_content() {
+        // Same length as "hello world" (11 bytes), so this would pass `min_valid_bytes`
+        // if that were the only check — checksum is what catches a truncated-but-padded
+        // or tampered download that size alone cannot.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(TEST_MODEL.filename);
+        std::fs::write(&path, b"tampered!!!").unwrap();
+        let err = verify_checksum(&path, &TEST_MODEL).unwrap_err();
+        assert!(err.to_string().contains("Checksum mismatch"));
     }
 }
