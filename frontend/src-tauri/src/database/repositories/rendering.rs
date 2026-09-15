@@ -1,3 +1,4 @@
+use crate::rendering::CanonicalSegment;
 use chrono::Utc;
 use sqlx::{Error as SqlxError, SqlitePool};
 
@@ -34,8 +35,9 @@ impl RenderingRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Gets the Canonical Transcript for a meeting as ordered segment texts. Ordering
-    /// matches playback order, so the same meeting always fingerprints the same way.
+    /// Gets the Canonical Transcript for a meeting as ordered segments, each carrying the
+    /// diarized Speaker (if any) attributed to it. Ordering matches playback order, so the
+    /// same meeting always fingerprints the same way.
     ///
     /// `audio_start_time` is nullable (added by a later migration, with no backfill for
     /// rows that predate it), and SQLite sorts NULL before any real value in `ASC` order —
@@ -48,16 +50,19 @@ impl RenderingRepository {
     pub async fn get_canonical_segments(
         pool: &SqlitePool,
         meeting_id: &str,
-    ) -> Result<Vec<String>, SqlxError> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT transcript FROM transcripts WHERE meeting_id = ? \
+    ) -> Result<Vec<CanonicalSegment>, SqlxError> {
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT transcript, speaker_label FROM transcripts WHERE meeting_id = ? \
              ORDER BY (audio_start_time IS NULL) ASC, audio_start_time ASC, rowid ASC",
         )
         .bind(meeting_id)
         .fetch_all(pool)
         .await?;
 
-        Ok(rows.into_iter().map(|(text,)| text).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(text, speaker_label)| CanonicalSegment { text, speaker_label })
+            .collect())
     }
 
     /// Gets the cached Rendering for a meeting, if any: `(rendered_text, source_fingerprint)`.
@@ -177,7 +182,32 @@ mod tests {
         let segments = RenderingRepository::get_canonical_segments(&pool, &meeting_id)
             .await
             .unwrap();
-        assert_eq!(segments, vec!["first", "second", "third"]);
+        let texts: Vec<&str> = segments.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, vec!["first", "second", "third"]);
+        assert!(segments.iter().all(|s| s.speaker_label.is_none()));
+    }
+
+    #[tokio::test]
+    async fn canonical_segments_carry_their_diarized_speaker_label() {
+        let pool = migrated_pool().await;
+        let meeting_id = seed_meeting(&pool, &["first", "second"]).await;
+
+        // `save_transcript` assigns each row its own fresh id, ignoring the fixture's
+        // `TranscriptSegment.id` — so the row is targeted by its (unique, in this test)
+        // text instead.
+        sqlx::query("UPDATE transcripts SET speaker_label = ? WHERE meeting_id = ? AND transcript = ?")
+            .bind("speaker_00")
+            .bind(&meeting_id)
+            .bind("first")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let segments = RenderingRepository::get_canonical_segments(&pool, &meeting_id)
+            .await
+            .unwrap();
+        assert_eq!(segments[0].speaker_label.as_deref(), Some("speaker_00"));
+        assert_eq!(segments[1].speaker_label, None);
     }
 
     /// Segments without `audio_start_time` (rows from before the column existed, or any
@@ -227,7 +257,8 @@ mod tests {
         let segments = RenderingRepository::get_canonical_segments(&pool, &meeting_id)
             .await
             .unwrap();
-        assert_eq!(segments, vec!["first", "second", "untimed"]);
+        let texts: Vec<&str> = segments.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, vec!["first", "second", "untimed"]);
     }
 
     /// When every segment in a meeting lacks `audio_start_time` (e.g. a meeting that
@@ -279,7 +310,8 @@ mod tests {
         let segments = RenderingRepository::get_canonical_segments(&pool, &meeting_id)
             .await
             .unwrap();
-        assert_eq!(segments, vec!["first", "second", "third"]);
+        let texts: Vec<&str> = segments.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, vec!["first", "second", "third"]);
     }
 
     #[tokio::test]

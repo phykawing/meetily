@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Loader2 } from 'lucide-react';
 import { fetchSpeakerNames } from '@/lib/meeting-speakers';
 import { resolveRenderingProviderLabel } from '@/components/RenderingProviderSettings';
+import { RenderedTurn, formatRenderedTurnsForCopy } from '@/lib/rendered-turns';
 
 type WrittenForm = 'colloquial' | 'written';
 
@@ -133,7 +134,7 @@ export function TranscriptPanel({
   // cached Rendering produced by the local model on demand — see phykawing/meetily#8 and
   // docs/adr/0002-canonical-transcript-is-verbatim-colloquial.md.
   const [writtenForm, setWrittenForm] = useState<WrittenForm>('colloquial');
-  const [renderedText, setRenderedText] = useState<string | null>(null);
+  const [renderedTurns, setRenderedTurns] = useState<RenderedTurn[] | null>(null);
   const [isLoadingRendering, setIsLoadingRendering] = useState(false);
   const [renderingError, setRenderingError] = useState<string | null>(null);
   // Which provider is actually producing the rendering (see phykawing/meetily#27) — resolved
@@ -151,7 +152,7 @@ export function TranscriptPanel({
 
   // Load the persisted per-meeting preference whenever the viewed meeting changes.
   useEffect(() => {
-    setRenderedText(null);
+    setRenderedTurns(null);
     setRenderingError(null);
     // Reset to the safe default too — otherwise a fetch for the new meeting can briefly
     // display the previous meeting's resolved provider label (e.g. a cloud provider's
@@ -191,9 +192,9 @@ export function TranscriptPanel({
         .catch((error) => {
           console.warn('Failed to resolve rendering provider label:', error);
         });
-      const text = await invoke<string>('get_transcript_rendering', { meetingId: requestedFor });
+      const turns = await invoke<RenderedTurn[]>('get_transcript_rendering', { meetingId: requestedFor });
       if (currentMeetingIdRef.current === requestedFor) {
-        setRenderedText(text);
+        setRenderedTurns(turns);
       }
     } catch (error) {
       if (currentMeetingIdRef.current === requestedFor) {
@@ -209,20 +210,20 @@ export function TranscriptPanel({
   }, [meetingId]);
 
   // Generate (or fetch the cached) rendering the first time the view switches to 書面語 for
-  // this meeting. Once loaded, `renderedText` is kept across toggling back to 口語 and
+  // this meeting. Once loaded, `renderedTurns` is kept across toggling back to 口語 and
   // forth again — per the "toggling back and forth does not regenerate it" requirement —
   // and is only cleared by a meeting change (above) or a transcript refetch (below).
   useEffect(() => {
     if (
       writtenForm === 'written' &&
       meetingId &&
-      renderedText === null &&
+      renderedTurns === null &&
       !isLoadingRendering &&
       !renderingError
     ) {
       fetchRendering();
     }
-  }, [writtenForm, meetingId, renderedText, isLoadingRendering, renderingError, fetchRendering]);
+  }, [writtenForm, meetingId, renderedTurns, isLoadingRendering, renderingError, fetchRendering]);
 
   const handleSelectWrittenForm = useCallback(
     async (next: WrittenForm) => {
@@ -247,7 +248,7 @@ export function TranscriptPanel({
   // wraps the caller-supplied refetch to drop the local rendering cache before reloading —
   // the next switch to 書面語 will regenerate against the new transcript.
   const handleRefetchTranscripts = useCallback(async () => {
-    setRenderedText(null);
+    setRenderedTurns(null);
     setRenderingError(null);
     if (onRefetchTranscripts) {
       await onRefetchTranscripts();
@@ -259,16 +260,16 @@ export function TranscriptPanel({
   // hand back something other than what's displayed, so this refuses rather than falling back.
   const handleCopy = useCallback(() => {
     if (writtenForm === 'written') {
-      if (!renderedText) {
+      if (!renderedTurns || renderedTurns.length === 0) {
         toast.error('書面語 rendering is not ready to copy yet.');
         return;
       }
-      navigator.clipboard.writeText(renderedText);
+      navigator.clipboard.writeText(formatRenderedTurnsForCopy(renderedTurns, speakerNames));
       toast.success('Transcript copied to clipboard');
       return;
     }
     onCopyTranscript();
-  }, [writtenForm, renderedText, onCopyTranscript]);
+  }, [writtenForm, renderedTurns, speakerNames, onCopyTranscript]);
 
   const canToggleWrittenForm = !isRecording && !!meetingId && convertedSegments.length > 0;
 
@@ -329,8 +330,20 @@ export function TranscriptPanel({
                 </Button>
               </div>
             )}
-            {!isLoadingRendering && !renderingError && renderedText && (
-              <p className="whitespace-pre-wrap text-sm text-gray-800">{renderedText}</p>
+            {!isLoadingRendering && !renderingError && renderedTurns && renderedTurns.length > 0 && (
+              <div className="space-y-3">
+                {renderedTurns.map((turn, index) => {
+                  const name = turn.speaker_label ? speakerNames[turn.speaker_label] : undefined;
+                  return (
+                    <div key={index}>
+                      {name && (
+                        <p className="text-sm font-semibold text-gray-900 mb-1">{name}</p>
+                      )}
+                      <p className="whitespace-pre-wrap text-sm text-gray-800">{turn.text}</p>
+                    </div>
+                  );
+                })}
+              </div>
             )}
           </div>
         ) : (

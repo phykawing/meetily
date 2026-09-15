@@ -10,8 +10,9 @@ use crate::summary::processor::clean_llm_markdown_output;
 use crate::summary::summary_engine::{self, ModelManagerState};
 
 use super::{
-    build_rendering_chunks, build_rendering_user_prompt, fingerprint_segments, RenderingProvider,
-    WrittenForm, RENDERING_SYSTEM_PROMPT,
+    build_rendering_chunks, build_rendering_user_prompt, fingerprint_segments,
+    interleave_turn_markers, parse_rendered_text, reconcile_rendered_chunk, RenderedTurn,
+    RenderingProvider, WrittenForm, RENDERING_SYSTEM_PROMPT,
 };
 
 /// Gets the persisted Written Form preference for a meeting ("colloquial" or "written").
@@ -233,7 +234,7 @@ pub async fn get_transcript_rendering<R: Runtime>(
     meeting_id: String,
     state: State<'_, AppState>,
     model_manager_state: State<'_, ModelManagerState>,
-) -> Result<String, String> {
+) -> Result<Vec<RenderedTurn>, String> {
     let pool = state.db_manager.pool();
 
     let segments = RenderingRepository::get_canonical_segments(pool, &meeting_id)
@@ -253,7 +254,7 @@ pub async fn get_transcript_rendering<R: Runtime>(
     match decide_rendering_cache(cached.as_ref().map(|(_, fp)| fp.as_str()), &fingerprint) {
         RenderingCacheDecision::ServeCached => {
             let (rendered_text, _) = cached.expect("ServeCached implies a cached rendering exists");
-            return Ok(rendered_text);
+            return Ok(parse_rendered_text(&rendered_text));
         }
         RenderingCacheDecision::Regenerate => {
             if cached.is_some() {
@@ -301,7 +302,8 @@ pub async fn get_transcript_rendering<R: Runtime>(
                 .map_err(|e| format!("Failed to resolve app data directory: {}", e))?;
 
             let chunk_size_tokens = resolve_chunk_size_tokens(model_def.context_size);
-            let chunks = build_rendering_chunks(&segments, chunk_size_tokens);
+            let units = interleave_turn_markers(&segments);
+            let chunks = build_rendering_chunks(&units, chunk_size_tokens);
             let num_chunks = chunks.len();
             let mut rendered_chunks = Vec::with_capacity(num_chunks);
 
@@ -319,14 +321,16 @@ pub async fn get_transcript_rendering<R: Runtime>(
                 .await
                 .map_err(|e| format!("Rendering generation failed: {}", e))?;
 
-                rendered_chunks.push(clean_llm_markdown_output(&raw));
+                let cleaned = clean_llm_markdown_output(&raw);
+                rendered_chunks.push(reconcile_rendered_chunk(chunk, &cleaned));
             }
 
             rendered_chunks.join("\n")
         }
         Some(remote) => {
             let chunk_size_tokens = resolve_remote_chunk_size_tokens(remote.custom_openai_max_tokens);
-            let chunks = build_rendering_chunks(&segments, chunk_size_tokens);
+            let units = interleave_turn_markers(&segments);
+            let chunks = build_rendering_chunks(&units, chunk_size_tokens);
             let num_chunks = chunks.len();
             let mut rendered_chunks = Vec::with_capacity(num_chunks);
             let client = reqwest::Client::new();
@@ -358,7 +362,8 @@ pub async fn get_transcript_rendering<R: Runtime>(
                 .await
                 .map_err(|e| format!("Rendering generation failed: {}", e))?;
 
-                rendered_chunks.push(clean_llm_markdown_output(&raw));
+                let cleaned = clean_llm_markdown_output(&raw);
+                rendered_chunks.push(reconcile_rendered_chunk(chunk, &cleaned));
             }
 
             rendered_chunks.join("\n")
@@ -369,7 +374,7 @@ pub async fn get_transcript_rendering<R: Runtime>(
         .await
         .map_err(|e| format!("Failed to cache rendering: {}", e))?;
 
-    Ok(rendered_text)
+    Ok(parse_rendered_text(&rendered_text))
 }
 
 #[cfg(test)]

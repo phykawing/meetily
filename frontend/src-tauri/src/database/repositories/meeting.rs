@@ -471,7 +471,8 @@ mod tests {
             RenderingRepository::get_canonical_segments(&pool, &meeting_id)
                 .await
                 .unwrap();
-        assert_eq!(texts, rendering_segments);
+        let rendering_texts: Vec<&str> = rendering_segments.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(texts, rendering_texts);
     }
 
     /// When every segment in a meeting lacks `audio_start_time` (e.g. a meeting that
